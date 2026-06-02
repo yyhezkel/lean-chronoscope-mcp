@@ -1,0 +1,89 @@
+# Test Log
+
+Append-only. Newest run first. Format: `## <UTC timestamp> — <suite>` then per-test PASS/FAIL.
+
+---
+
+## 2026-05-29T06:30Z — gateway + regression (v1.2.0)
+
+New: `--gateway` / `BROWSER_MCP_GATEWAY=1` mode advertises 3 meta-tools (`tools_catalog`, `tool_schema`, `tools_invoke`) instead of 56; the underlying 56 stay callable by name (additive, not restrictive).
+
+- gateway smoke (`scripts/smoke-test-gateway.mjs`) — **14/14 ✓**
+- 56-tool regression in full mode (`scripts/test-all-tools.mjs`) — **56/56 PASS**
+
+Measured `tools/list` payload by mode (browser-mcp v1.2.0):
+
+| mode | tools | payload | tokens |
+|---|---|---|---|
+| full | 56 | 21,031 ch | ~5,258 |
+| slim | 5 | 2,189 ch | ~547 |
+| gateway | 3 | 1,284 ch | ~321 |
+
+Note: for **Claude Code** the full-mode payload above is the *server-emitted* size; the client defers MCP tool schemas natively (only names mount, schemas fetched on demand via `ToolSearch`), so gateway is redundant there. See `docs/FOLLOWUPS.md`.
+
+## 2026-05-28T15:40Z — all-tools suite (v1.1.1)
+
+Every one of the 56 MCP tools exercised end-to-end over one shared session via
+`scripts/test-all-tools.mjs`. Per-tool checklist: `docs/TOOL_TESTS.md`.
+
+Summary: **56/56 PASS**
+
+Found + fixed while building this suite:
+- **page_back / page_forward reported `navigated:false` after a real navigation.**
+  `pageHistory` set `navigated = resp != null`, but puppeteer resolves
+  `goBack()`/`goForward()` to `null` for back-forward-cache navigations even
+  though the page did navigate. Now also treats a URL change as navigation
+  (`src/daemon/rpc-handlers.ts`). Verified via the script and the native MCP client.
+
+Build/ops note (not a source bug): a stale on-disk `dist/.../migrations/001_initial.sql`
+(an old copy that still carried `PRAGMA synchronous` inside the file) broke fresh
+sessions with "Safety level may not be changed inside a transaction" — pragmas
+must be set in `db.ts` before the migration transaction, which the source 001
+already does. Fixed by a clean `rm -rf dist && pnpm build`. The deployed image is
+built cleanly, so this only bit a hand-patched dist.
+
+## 2026-05-28T08:39:21Z — all smokes (v1.1.0)
+
+- m1            ........ PASS
+- m2-socket     ........ PASS
+- m2-collectors ........ PASS
+- m2-mcp        ........ PASS
+- m2-changes    ........ PASS
+- m3            ........ PASS
+- m5m6          ........ PASS
+- v11           ........ PASS
+
+Summary: **8/8 PASS**
+
+v1.1 added: script_evaluate, page lifecycle (list/new/select/close/back/forward/reload), session lifecycle (list/new/close), wait_for, network_wait_for, upload_file (56 tools total).
+
+Fixed this round:
+- **Daemon crash on page close** — `ConsoleCollector` dispose did `void client.detach()`; the async rejection ("Session already detached") escaped as an unhandledRejection and killed the daemon. Now `.catch()`-guarded, plus daemon-level `uncaughtException`/`unhandledRejection` handlers.
+- **Network responses never recorded** (latent since M1) — `requestId()` fell back to a random id per call when `_requestId` was undefined, so request-insert and response-update used different keys → status/headers stayed NULL. Now uses puppeteer 24's public `HTTPRequest.id`.
+
+---
+
+## 2026-05-28T07:23:16Z — all smokes (v1.0.0)
+
+- m1            ........ PASS
+- m2-socket     ........ PASS
+- m2-collectors ........ PASS
+- m2-mcp        ........ PASS
+- m2-changes    ........ PASS
+- m3            ........ PASS
+- m5m6          ........ PASS
+
+Summary: **7/7 PASS** (M4 rescaling/slim/retention/HTTP-bridge, M5 snapshot_diff/performance_metrics/FTS5 search, M6 daemon_status + v1.0 stamp)
+
+---
+
+## 2026-05-27T22:49:54Z — all smokes
+
+- m1            ........ PASS
+- m2-socket     ........ PASS
+- m2-collectors ........ PASS
+- m2-mcp        ........ PASS
+- m2-changes    ........ PASS
+- m3            ........ PASS
+
+Summary: **6/6 PASS**

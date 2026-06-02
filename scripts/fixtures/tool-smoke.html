@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>tool-smoke</title>
+</head>
+<body>
+  <h1>Tool Smoke Page</h1>
+
+  <a id="lnk" href="https://tool-smoke.test/other" aria-label="smoke-link">smoke-link</a>
+
+  <form id="f" onsubmit="return false">
+    <input id="txt" type="text" aria-label="smoke-text" />
+    <select id="sel" aria-label="smoke-select">
+      <option value="a">a</option>
+      <option value="b">b</option>
+    </select>
+    <input id="chk" type="checkbox" aria-label="smoke-check" />
+    <input id="file" type="file" aria-label="smoke-file" />
+    <button id="btn" type="button" aria-label="smoke-btn"
+            onclick="window.__clicked = true; this.textContent = 'clicked';">smoke-btn</button>
+  </form>
+
+  <div id="src" role="button" tabindex="0" aria-label="drag-src"
+       style="width:80px;height:80px;background:#ccc">drag-src</div>
+  <div id="dst" role="button" tabindex="0" aria-label="drag-dst"
+       style="width:80px;height:80px;background:#eee">drag-dst</div>
+
+  <div style="height:2200px">tall spacer for scrolling</div>
+  <div id="ready">READY_TOKEN</div>
+
+  <script>
+    // Console messages for console_list / console_get / console_search.
+    console.log("toolsmoke_log_marker hello");
+    console.warn("toolsmoke_warn_marker warn");
+    console.error("toolsmoke_err_marker boom");
+
+    // drag drop marker (best-effort; depends on synthetic event delivery)
+    document.getElementById("dst").addEventListener("mouseup", function () {
+      window.__dropped = true;
+    });
+
+    // Seed localStorage / sessionStorage so the page has a real origin store.
+    try {
+      localStorage.setItem("seeded_ls", "1");
+      sessionStorage.setItem("seeded_ss", "1");
+    } catch (e) {}
+
+    // Seed an IndexedDB database for indexeddb_* tools.
+    try {
+      const open = indexedDB.open("smokeDb", 1);
+      open.onupgradeneeded = () => open.result.createObjectStore("things", { keyPath: "id" });
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction("things", "readwrite");
+        tx.objectStore("things").put({ id: 1, name: "alpha" });
+        tx.objectStore("things").put({ id: 2, name: "beta" });
+        tx.oncomplete = () => { db.close(); document.title = "tool-smoke-ready"; };
+      };
+    } catch (e) {}
+
+    // Subresource fetch so the network log has a completed request with a body.
+    fetch("https://tool-smoke.test/api/data")
+      .then((r) => r.text())
+      .then((t) => { window.__api = t; })
+      .catch(() => {});
+  </script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+{
+  "name": "lean-chronoscope-mcp",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Token-efficient browser MCP server: headless Chrome in Docker that captures everything (console / network / IndexedDB / snapshots) and lets the model query on read.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Yossi Yehezkel",
+  "homepage": "https://github.com/yyhezkel/lean-chronoscope-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yyhezkel/lean-chronoscope-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yyhezkel/lean-chronoscope-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser",
+    "headless-chrome",
+    "puppeteer",
+    "claude",
+    "anthropic",
+    "ai-agent",
+    "web-debugging",
+    "token-efficient"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json && cp -r src/daemon/storage/migrations dist/daemon/storage/migrations",
+    "dev:daemon": "tsx watch src/bin/daemon.ts",
+    "dev:mcp": "tsx src/bin/mcp.ts",
+    "start:daemon": "node dist/bin/daemon.js",
+    "start:mcp": "node dist/bin/mcp.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.10.0",
+    "pino": "^9.5.0",
+    "puppeteer-core": "^24.0.0",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "tsc-alias": "^1.8.17",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["better-sqlite3"]
+  }
+}
