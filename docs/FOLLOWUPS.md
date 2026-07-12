@@ -1,11 +1,11 @@
 # Follow-ups
 
-Known deferrals and rough edges, not blocking v1.3.0. Ordered roughly by value.
+Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
 
 ## Features deferred past v1.0
 
 - **Screencast resource** (planned M5.2, cut). `Page.startScreencast` → 2fps JPEG frames exposed as `browser://session/{sid}/page/{pid}/screencast`, with `resources/updated` carrying the latest frame's blob sha. Stop the CDP screencast when no subscribers remain.
-- **`session_attach`** (title-based reattach). The plan's session tool table lists it; skipped because it needs a reattach-by-title flow. Today each stdio MCP connection is bound to a fixed `--session` id.
+- ~~**`session_attach`** (title-based reattach).~~ **Resolved (v1.4.0).** The `session_attach` tool now points a connection at an existing session by id or by human **title** (attach-or-create when a title matches nothing), rehydrating a closed session's captured history from disk. The HTTP bridge also honors an `x-lc-session: <id>` reconnect header to return to the same session. Untrusted ids are validated by `assertSafeSessionId()` (no `/`, `\`, `..`, NUL, empty, >200 chars) to block path traversal.
 - **HTTP-bridge TLS + rate limiting.** `src/mcp/http-bridge.ts` has bearer-token auth and binds loopback only; it has no built-in TLS and no rate limiting. Intended for SSH/Wireguard or behind an nginx TLS proxy. Add TLS termination options if it's ever exposed directly.
 - **In-place Chrome relaunch.** On Chrome disconnect the daemon exits and Docker's restart policy reboots it (sessions' browser state is lost, SQLite survives). A nicer recovery would relaunch Chrome in-process and re-create `BrowserContext`s + collectors + intercept engines without dropping the daemon.
 
@@ -18,6 +18,7 @@ Known deferrals and rough edges, not blocking v1.3.0. Ordered roughly by value.
 - **Concurrent tool calls can race.** Firing tool calls without awaiting the previous one (e.g. `page_navigate` immediately followed by `snapshot_take`) can fail with "Page not found: (no selected page)" because the snapshot runs before navigate finishes creating/selecting the page. Real MCP clients await each call, so it's fine in practice — but the daemon could serialize calls per-session (a per-session mutex, mirroring chrome-devtools-mcp's `Mutex`) to make ordering robust regardless of client behavior.
 - **`network_list` is empty right after a fresh navigate.** The top-level document request fires `requestWillBeSent` before `frameNavigated` creates the nav row, so it's stored with `nav_id = NULL`. `network_list`'s default scope filters to the latest nav id and hides it. `network_wait_for` / `network_search` (no nav filter) do find it. Fix options: attribute null-nav requests to the page's newest nav at read time, or include null-nav rows in the current-nav default scope.
 - ~~**Sessions accumulate; nothing closes them mid-run.**~~ **Resolved (v1.3.0).** A background **reaper** now evicts idle sessions (idle past `LEAN_CHRONOSCOPE_IDLE_MS`, default 30min) and oversized ones (`LEAN_CHRONOSCOPE_SIZE_CAP_BYTES`, default 500MB), prunes over-long console/network/snapshot rows, and runs the age-retention sweep (`LEAN_CHRONOSCOPE_RETENTION_DAYS`, default 7) ~hourly rather than only at daemon start. The HTTP bridge also closes its daemon session on client disconnect (`transport.onclose`), so BrowserContexts/SQLite no longer leak per HTTP connection. A persistent `registry.sqlite` tracks all sessions across restarts. Smokes still `session_close` when done as good hygiene, but leaked sessions are now reaped automatically.
+- ~~**Pruned rows leave orphaned blob files.**~~ **Resolved (v1.4.0).** `SessionWriter.prune()` now GCs orphaned blobs right after deleting old console/network rows: `BlobStore.sweepUnreferenced(keep)` + `BlobStore.remove(sha)` delete only `sessions/<id>/blobs/<sha>.bin` whose sha is no longer referenced by any surviving row (content-addressed dedup respected — a shared blob is kept while any row points to it). Previously pruned rows left orphaned blobs on disk until the 7-day age sweep removed the whole session dir.
 
 ## MCP client integration note
 

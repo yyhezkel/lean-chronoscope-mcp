@@ -11,6 +11,7 @@ export type SessionStatus = "open" | "closed";
 
 export interface RegistryRow {
   id: string;
+  title: string | null;
   createdAt: number;
   lastActivity: number;
   status: SessionStatus;
@@ -51,11 +52,18 @@ export class RegistryStore {
         page_count    INTEGER NOT NULL DEFAULT 0,
         size_bytes    INTEGER NOT NULL DEFAULT 0,
         closed_at     INTEGER,
-        data_dir      TEXT
+        data_dir      TEXT,
+        title         TEXT
       );
       CREATE INDEX IF NOT EXISTS ix_sessions_last_activity ON sessions(last_activity);
       CREATE INDEX IF NOT EXISTS ix_sessions_status        ON sessions(status);
     `);
+    // Idempotent upgrade for registries created before the title column existed.
+    const cols = this.db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "title")) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN title TEXT`);
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS ix_sessions_title ON sessions(title)`);
   }
 
   /** Insert or re-open a session row (called once per create). */
@@ -65,15 +73,30 @@ export class RegistryStore {
     lastActivity: number;
     source: SessionSource | null;
     dataDir: string | null;
+    title: string | null;
   }): void {
     this.run(
-      `INSERT INTO sessions (id, created_at, last_activity, status, source, data_dir)
-       VALUES (@id, @createdAt, @lastActivity, 'open', @source, @dataDir)
+      `INSERT INTO sessions (id, created_at, last_activity, status, source, data_dir, title)
+       VALUES (@id, @createdAt, @lastActivity, 'open', @source, @dataDir, @title)
        ON CONFLICT(id) DO UPDATE SET
-         status='open', last_activity=@lastActivity, source=@source,
-         data_dir=@dataDir, closed_at=NULL`,
+         status='open', last_activity=@lastActivity,
+         source=COALESCE(@source, source), data_dir=@dataDir, closed_at=NULL,
+         title=COALESCE(@title, title)`,
       row,
     );
+  }
+
+  /** Newest-active session id carrying `title`, or null. */
+  resolveByTitle(title: string): string | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT id FROM sessions WHERE title=? ORDER BY last_activity DESC LIMIT 1`)
+        .get(title) as { id: string } | undefined;
+      return row?.id ?? null;
+    } catch (err) {
+      log.warn({ err, title }, "registry.resolveByTitle failed");
+      return null;
+    }
   }
 
   /** Periodic stats flush from the reaper tick (live sessions only). */
@@ -148,6 +171,7 @@ export class RegistryStore {
       const rows = (status ? this.db.prepare(sql).all(status) : this.db.prepare(sql).all()) as any[];
       return rows.map((r) => ({
         id: r.id,
+        title: r.title ?? null,
         createdAt: r.created_at,
         lastActivity: r.last_activity,
         status: r.status,

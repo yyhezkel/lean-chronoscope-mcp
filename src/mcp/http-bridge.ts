@@ -4,6 +4,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { getLogger } from "@shared/logger.js";
 import type { DaemonClient } from "./daemon-client.js";
+import type { ToolContext } from "./tools/ToolDefinition.js";
 import { allTools, getTool, selectTools, type ToolMode } from "./tools/tools.js";
 import { toJsonSchemaDraft2020 } from "./tools/jsonschema.js";
 import { McpResponse } from "./response/McpResponse.js";
@@ -65,7 +66,11 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     let transport = sid ? sessionTransports.get(sid) : undefined;
 
     if (!transport) {
-      const browserMcpSession = opts.sessionId();
+      // Persistence: a client that sends a stable `x-lc-session` header reuses
+      // (or rehydrates from disk) the same daemon session across reconnects.
+      // Absent the header, mint a fresh random id as before.
+      const pinned = (req.headers["x-lc-session"] as string | undefined)?.trim();
+      const browserMcpSession = pinned && pinned.length > 0 ? pinned : opts.sessionId();
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSid) => {
@@ -120,8 +125,10 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
 async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMode): Promise<Server> {
   await daemon.call("session.ensure", { sessionId, source: "http" });
   const advertised = selectTools(mode);
+  // One mutable context per connection — `session_attach` reassigns conn.sessionId.
+  const conn: ToolContext = { sessionId, daemon };
   const server = new Server(
-    { name: "lean-chronoscope-mcp", version: "1.3.0" },
+    { name: "lean-chronoscope-mcp", version: "1.4.0" },
     { capabilities: { tools: {}, resources: { subscribe: true, listChanged: true } } },
   );
   registerResourceHandlers({ server, daemon, sessionId, allTools });
@@ -141,7 +148,7 @@ async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMo
       return new McpResponse().setError(`Invalid args: ${parsed.error.message}`).build() as never;
     }
     try {
-      return (await tool.handler(parsed.data, { sessionId, daemon })) as never;
+      return (await tool.handler(parsed.data, conn)) as never;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return new McpResponse().setError(`${name} failed: ${msg}`).build() as never;

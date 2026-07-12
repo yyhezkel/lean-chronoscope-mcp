@@ -4,6 +4,34 @@ All notable changes to this project will be documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [semver](https://semver.org/).
 
+## [1.4.0] — 2026-07-12
+
+### Added
+- **`session_attach` tool** (56 → 57 tools). Points the connection at an
+  existing session by `sessionId` or human `title` so every later tool acts on
+  it; **rehydrates a closed session's captured history from disk**; **attach-or-
+  create** (a title matching nothing starts a new session carrying it). Backed
+  by a mutable per-connection tool context.
+- **Session titles.** Sessions carry an optional `title` (new `registry.sqlite`
+  column, added via idempotent `ALTER TABLE`; `session_list` entries now include
+  it). New RPC **`session.resolve({title})`** → newest-active id with that title.
+- **HTTP session persistence.** The HTTP bridge honors a client-supplied
+  **`x-lc-session: <id>`** header — reconnecting with the same header returns to
+  the same daemon session (rehydrated from disk if it had been closed) instead
+  of a fresh random `http-<rand>` id. No header → random id, as before.
+
+### Changed
+- **Blob-GC on prune.** After `SessionWriter.prune()` deletes rows, it now sweeps
+  orphaned blob files immediately (`BlobStore.sweepUnreferenced`), reclaiming
+  disk without waiting for the age sweep. Content-addressed dedup is respected —
+  a blob is deleted only once no surviving row references its sha.
+
+### Security
+- **Path-traversal guard.** Session ids now arrive from untrusted callers
+  (attach `sessionId`, the `x-lc-session` header) and become filesystem paths.
+  `assertSafeSessionId()` (enforced in the daemon's `ensure`) rejects ids with
+  `/`, `\`, `..`, NUL, or that are empty / >200 chars.
+
 ## [1.3.0] — 2026-07-12
 
 ### Changed

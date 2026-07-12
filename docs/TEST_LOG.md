@@ -4,6 +4,22 @@ Append-only. Newest run first. Format: `## <UTC timestamp> — <suite>` then per
 
 ---
 
+## 2026-07-12T18:35Z — blob-GC + session_attach + HTTP persistence (v1.4.0)
+
+New: dedup-safe blob-GC on prune; `session_attach` tool (by id/title, rehydrate, attach-or-create); `x-lc-session` header for HTTP session persistence; `assertSafeSessionId` path-traversal guard; `session.resolve` RPC; `title` on registry + `session_list`.
+
+Rebuilt `lean-chronoscope-mcp:local` (v1.4.0); container healthy; registry `title` column added to the existing DB via idempotent ALTER.
+
+- 57-tool suite (`scripts/test-all-tools.mjs`) — **57/57 PASS** (incl. new `session_attach`: attach-or-create by title, by-title reuse `created:false`, switch back by id)
+- RPC layer (daemon-client): `session.resolve` by title (live + registry/closed), rehydrate closed session (`ensure` → `created:true`, reopens disk DB), path-traversal `../evil` **rejected** — **PASS**
+- HTTP persistence: `initialize` with `x-lc-session: myapp` → deterministic id `myapp`; reconnect with same header → same session; no-header still mints random `http-*` — **PASS**
+- Blob-GC (real `writer.prune()` + `blobs.sweepUnreferenced()` on a live DB with 2 blobs, `MAX_NETWORK=1`): orphaned `.bin` swept, surviving `.bin` matches the surviving row (dedup-safe) — **PASS**
+- Live MCP: `session_attach({title:"live-demo"})` create → navigate on the switched session → attach again reuses it (`created:false`, page retained); `session_list` shows `title`/`source` — **PASS**
+
+Summary: **57/57 tools + blob-GC + attach/resolve/rehydrate + HTTP-persistence + traversal-guard PASS**
+
+---
+
 ## 2026-07-12T17:05Z — rename + session lifecycle + registry + DB retention (v1.3.0)
 
 Full rename browser-mcp → lean-chronoscope-mcp (container/image/volumes/paths/env, `LEAN_CHRONOSCOPE_*` with legacy `BROWSER_MCP_*` fallback). New: `registry.sqlite` cross-session index, size accounting (db+wal+shm+blobs), idle+size reaper (evict-only), row pruning + VACUUM/checkpoint, clean close, HTTP-bridge leak fix.

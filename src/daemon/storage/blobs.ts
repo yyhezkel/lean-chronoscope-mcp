@@ -53,6 +53,40 @@ export class BlobStore {
     return { sha, bytes: buf.length };
   }
 
+  /** Delete one blob by sha (best-effort). */
+  remove(sha: string): void {
+    try {
+      fs.rmSync(getBlobPath(this.sessionId, sha, this.dataDir), { force: true });
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /**
+   * Delete every blob file whose sha is NOT in `keep`. Content-addressed dedup
+   * means a file is orphaned only once no row references its sha, so callers
+   * must pass the full set of still-referenced shas. Returns count removed.
+   */
+  sweepUnreferenced(keep: Set<string>): number {
+    const dir = getBlobDir(this.sessionId, this.dataDir);
+    let removed = 0;
+    try {
+      for (const name of fs.readdirSync(dir)) {
+        const sha = name.endsWith(".bin") ? name.slice(0, -4) : name;
+        if (keep.has(sha)) continue;
+        try {
+          fs.rmSync(path.join(dir, name), { force: true });
+          removed++;
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* dir gone */
+    }
+    return removed;
+  }
+
   /** Sum of all blob file sizes in this session's blob dir. */
   totalBytes(): number {
     const dir = getBlobDir(this.sessionId, this.dataDir);

@@ -9,7 +9,7 @@ import {
   pageForward,
   pageReload,
 } from "./pages.js";
-import { sessionList, sessionNew, sessionClose } from "./session.js";
+import { sessionList, sessionNew, sessionClose, sessionAttach } from "./session.js";
 import { screenshotTake } from "./screenshot.js";
 import { consoleList, consoleGet } from "./console.js";
 import { networkList, networkGet } from "./network.js";
@@ -46,6 +46,7 @@ export const allTools: ToolDefinition<any>[] = [
   sessionList,
   sessionNew,
   sessionClose,
+  sessionAttach,
   pageNavigate,
   pageList,
   pageNew,

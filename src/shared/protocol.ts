@@ -31,6 +31,7 @@ export type DaemonMethod =
   | "page.reload"
   | "session.list"
   | "session.close"
+  | "session.resolve"
   | "wait.for"
   | "network.wait_for"
   | "input.upload_file"
@@ -170,6 +171,7 @@ export interface SessionListParams {
 }
 export interface SessionListEntry {
   id: string;
+  title: string | null;
   createdAt: number;
   lastActivity: number;
   pageCount: number;
@@ -184,6 +186,9 @@ export interface SessionListResult {
 }
 export interface SessionCloseParams { sessionId: string; }
 export interface SessionCloseResult { sessionId: string; closed: boolean; }
+
+export interface SessionResolveParams { title: string; }
+export interface SessionResolveResult { sessionId: string | null; }
 
 export interface PageNavigateParams {
   sessionId: string;

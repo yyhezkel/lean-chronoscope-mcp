@@ -1,6 +1,6 @@
 # lean-chronoscope-mcp
 
-**A token-efficient browser MCP server.** Headless Chrome in Docker, captures everything (console, network, exceptions, IndexedDB, snapshots) into a per-session SQLite store, and exposes 56 tools that query that store — so the model only pays for what it asks for.
+**A token-efficient browser MCP server.** Headless Chrome in Docker, captures everything (console, network, exceptions, IndexedDB, snapshots) into a per-session SQLite store, and exposes 57 tools that query that store — so the model only pays for what it asks for.
 
 Built for Claude Code, Claude Desktop, and any other MCP client. Drop-in alternative to [`@playwright/mcp`](https://github.com/microsoft/playwright-mcp) and [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp), with a sharper focus on tokens-per-task.
 
@@ -18,7 +18,7 @@ This server takes a different shape:
 
 - **Capture firehose, query on read.** A long-running daemon owns Chrome over CDP and writes every console message, network request, exception, and snapshot to a per-session SQLite + content-addressed blob store. Tools are queries on top — listings return summaries, detail tools fetch bodies.
 - **Compact, interactive-only snapshot.** `[e12] button "Save"` style tree — ~2.8× smaller than Playwright's full aria YAML on the same page ([measured](docs/COMPARISON.md)).
-- **Three mount-cost modes.** `full` (56 tools, ~5.3k tok at mount), `slim` (5 core tools, ~547 tok), or `gateway` (3 meta-tools, ~321 tok — the model picks tools on demand and the schemas load only when asked for).
+- **Three mount-cost modes.** `full` (57 tools, ~5.3k tok at mount), `slim` (5 core tools, ~547 tok), or `gateway` (3 meta-tools, ~321 tok — the model picks tools on demand and the schemas load only when asked for).
 - **Tools other servers lack:** IndexedDB read/write, network interception (abort / continue / respond), 3-mode secret redaction, FTS5 search across console + network history, snapshot diffs.
 - **Live MCP resources** with real `listChanged` and per-section change-detect memo — `(unchanged since rev N)` collapses repeated polling.
 
@@ -65,11 +65,13 @@ Restart your client session — tool lists load at startup.
 
 Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you choose). The Docker container is named `lean-chronoscope-mcp` by default — that's a local name only; rename it via `container_name:` in `docker/docker-compose.yml` if you prefer.
 
-## Tool surface (56 tools)
+**Reusing a session across reconnects (HTTP):** by default the HTTP bridge mints a fresh browser session per connection. Send an `x-lc-session: <id>` request header to pin a stable session id — reconnecting with the same header returns to the same daemon session (rehydrated from disk if the earlier disconnect closed it) instead of a new random one. Session ids from callers are validated (no `/`, `\`, `..`, NUL, empty, or >200 chars) to prevent path traversal, since an id becomes a filesystem path.
+
+## Tool surface (57 tools)
 
 | Category | Tools |
 |---|---|
-| Session | `session_list`, `session_new`, `session_close` |
+| Session | `session_list`, `session_new`, `session_attach`, `session_close` |
 | Pages | `page_navigate`, `page_list`, `page_new`, `page_select`, `page_close`, `page_back`, `page_forward`, `page_reload` |
 | Perception | `snapshot_take`, `snapshot_diff`, `screenshot_take`, `wait_for` |
 | Input | `click`, `hover`, `type`, `fill_form`, `key`, `scroll`, `drag`, `upload_file` |
@@ -84,9 +86,9 @@ Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you
 
 | Mode | Flag / env | Tools advertised | `tools/list` payload |
 |---|---|---|---|
-| `full` *(default)* | — | 56 | ~5,258 tok |
+| `full` *(default)* | — | 57 | ~5,350 tok |
 | `slim` | `--slim` / `LEAN_CHRONOSCOPE_SLIM=1` | 5 core | ~547 tok |
-| `gateway` | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`) — the 56 stay callable by name | ~321 tok |
+| `gateway` | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`) — the 57 stay callable by name | ~321 tok |
 
 **Gateway mode** advertises a 3-tool index: the model reads `tools_catalog`, fetches `tool_schema` only for tools it needs, then calls them via `tools_invoke`. Useful for MCP clients that don't already defer tool schemas on the client side. *Note:* Claude Code already defers MCP schemas natively — gateway is mostly useful for other clients or extreme token budgets. See [`docs/COMPARISON.md`](docs/COMPARISON.md) for the full breakdown.
 
@@ -122,6 +124,13 @@ and takes an optional `includeClosed` to also surface closed sessions from the
 registry; `daemon_status` reports the same accounting plus a `dbBytes`/`blobBytes`
 breakdown.
 
+Sessions can carry an optional human **`title`** (a column in `registry.sqlite`,
+surfaced on `session_list`). The **`session_attach`** tool points a connection at
+an existing session — by id or by title — and **rehydrates a closed session's
+captured history** from disk (the BrowserContext starts fresh; browser state
+isn't persisted, but all captured console/network/snapshot history is readable).
+A title that matches nothing starts a new session carrying it (**attach-or-create**).
+
 A background **reaper** keeps things bounded automatically:
 
 - **Idle / size eviction** — frees the browser context + memory (leaving the
@@ -131,7 +140,10 @@ A background **reaper** keeps things bounded automatically:
 - **Row pruning** — keeps the newest `LEAN_CHRONOSCOPE_MAX_CONSOLE` (50k) console
   rows, `LEAN_CHRONOSCOPE_MAX_NETWORK` (50k) network rows, and
   `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` (10) snapshots per page; FTS stays in
-  sync via triggers and freed pages are reclaimed with `incremental_vacuum`.
+  sync via triggers and freed pages are reclaimed with `incremental_vacuum`. Prune
+  now also **GCs orphaned blob files** right after deleting rows — a
+  content-addressed blob (`blobs/<sha>.bin`) is removed only once no surviving row
+  references its sha (dedup-safe), instead of lingering until the age sweep.
 - **Age sweep** — session dirs older than `LEAN_CHRONOSCOPE_RETENTION_DAYS`
   (default 7) are removed ~hourly (not just at boot) and the registry stays in sync.
 
@@ -149,7 +161,7 @@ closing so the persisted `db.sqlite` is complete and compact.
 | Snapshot format | compact, interactive-only | full aria YAML | aria + extras |
 | Snapshot cost (HN, ~tok) | **~5,343** | ~14,756 | similar to Playwright |
 | 5-step task cost (~tok) | **~5.6k** | ~24k | similar to Playwright |
-| Mount overhead | 56 tools, ~5.3k tok (or 321 in gateway) | 20 tools, ~2k | ~30 tools |
+| Mount overhead | 57 tools, ~5.3k tok (or 321 in gateway) | 20 tools, ~2k | ~30 tools |
 | IndexedDB tools | ✅ | ❌ | ❌ |
 | Network interception | ✅ abort / continue / respond | ❌ | ❌ |
 | Secret redaction | ✅ 3-mode | ❌ | ❌ |
@@ -175,7 +187,7 @@ pnpm install
 pnpm typecheck
 pnpm build
 docker compose -f docker/docker-compose.yml up -d --build
-node scripts/test-all-tools.mjs        # 56-tool e2e suite (must pass 56/56)
+node scripts/test-all-tools.mjs        # 57-tool e2e suite (must pass 57/57)
 node scripts/bench-tokens.mjs           # measure mount + per-call cost
 node scripts/smoke-test-gateway.mjs     # gateway-mode smoke
 ```

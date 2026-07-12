@@ -26,7 +26,7 @@ const CONTAINER_UPLOAD = "/tmp/tool-upload.txt";
 
 // Master ordered tool list, grouped by category (56 total).
 const CATEGORIES = {
-  Session: ["session_list", "session_new", "session_close"],
+  Session: ["session_list", "session_new", "session_close", "session_attach"],
   Pages: ["page_navigate", "page_list", "page_new", "page_select", "page_close", "page_back", "page_forward", "page_reload"],
   "Snapshot/Screenshot": ["snapshot_take", "snapshot_diff", "screenshot_take", "wait_for"],
   Console: ["console_list", "console_get", "console_search"],
@@ -96,6 +96,20 @@ async function main() {
     const r = sc(await callTool("session_list", {}));
     assert((r.sessions ?? []).some((s) => s.id === SESSION_ID), "our session not listed");
     return `${r.sessions.length} sessions`;
+  });
+
+  await t("session_attach", async () => {
+    const title = `attach-smoke-${SESSION_ID}`;
+    const a = sc(await callTool("session_attach", { title }));
+    assert(a.created === true && a.attached === true, "attach-or-create failed");
+    const reuse = sc(await callTool("session_attach", { title }));
+    assert(reuse.created === false && reuse.sessionId === a.sessionId, "by-title reuse failed");
+    // Switch back so the rest of the suite runs on our original session.
+    const back = sc(await callTool("session_attach", { sessionId: SESSION_ID }));
+    assert(back.sessionId === SESSION_ID, "switch back to original session failed");
+    // Clean up the throwaway attached session.
+    await callTool("session_close", { sessionId: a.sessionId });
+    return `created+reused ${a.sessionId.slice(0, 12)}, back to original`;
   });
 
   // ---- intercept (self-contained throwaway rule) ----

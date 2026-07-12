@@ -1,9 +1,12 @@
 # lean-chronoscope-mcp — Implementation Plan
 
-> **State: v1.3.0** — M0–M6 shipped plus the session-lifecycle layer (persistent
+> **State: v1.4.0** — M0–M6 shipped plus the session-lifecycle layer (persistent
 > `registry.sqlite`, correct size accounting, and the background reaper for
-> idle/size eviction + row pruning + hourly age-retention). Sections below that
-> were originally written as "planned" for the registry and retention are now
+> idle/size eviction + row pruning + hourly age-retention), plus **session reuse**
+> (the `session_attach` tool — attach by id/title with disk rehydration — and the
+> HTTP bridge's `x-lc-session` reconnect header) and **dedup-safe blob-GC on
+> prune**. 57 tools in full mode. Sections below that were originally written as
+> "planned" for the registry, retention, and `session_attach` are now
 > **implemented** — see the notes inline.
 
 ## Context
@@ -187,6 +190,20 @@ accounting plus a `dbBytes`/`blobBytes` breakdown. (The `sizeBytes` fix was a bu
 correction — previously only `db.sqlite` was counted; the old `totalRevisions`
 field was removed.)
 
+**Session reuse (implemented, v1.4.0):** the `sessions` table gains an optional
+`title` column (added via idempotent `ALTER TABLE`), surfaced on `session_list`.
+RPC `session.resolve({title})` returns the newest active session id with that
+title. The `session_attach` tool points a connection at an existing session by id
+or title (attach-or-create when a title matches nothing) and rehydrates a closed
+session's captured history from disk — the BrowserContext starts fresh (browser
+state isn't persisted) but console/network/snapshot history is readable. The HTTP
+bridge honors an `x-lc-session: <id>` request header so a reconnecting client
+returns to the same daemon session instead of a fresh random `http-<rand>` id.
+Because ids now come from untrusted callers and become filesystem paths,
+`assertSafeSessionId()` (called in the daemon's `ensure`) rejects ids with `/`,
+`\`, `..`, NUL, or that are empty / >200 chars, preventing traversal out of the
+sessions dir.
+
 **Retention & reaper (implemented, v1.3.0):** a background reaper runs on a timer
 (`setInterval`, `LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS`, default 60000, `0` disables)
 and each tick:
@@ -199,6 +216,12 @@ and each tick:
   (50k) network rows, and `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` (10) snapshots
   per page; FTS stays in sync via triggers and freed pages are reclaimed with
   `incremental_vacuum` (session DBs open with `auto_vacuum=INCREMENTAL`);
+- **GCs orphaned blobs (dedup-safe, v1.4.0):** immediately after pruning rows,
+  `SessionWriter.prune()` sweeps `sessions/<id>/blobs/<sha>.bin` and deletes only
+  blobs no longer referenced by any surviving row (`BlobStore.sweepUnreferenced(keep)`
+  + `BlobStore.remove(sha)`) — content-addressed dedup respected, so a shared blob
+  survives while any row points to it. Previously orphaned blobs lingered until the
+  age sweep removed the whole dir;
 - runs the **age-retention sweep** (`LEAN_CHRONOSCOPE_RETENTION_DAYS`, default 7)
   ~hourly — not only at daemon boot — removing old session dirs and keeping the
   registry in sync.
@@ -218,7 +241,7 @@ Migration: `src/daemon/storage/migrations/001_initial.sql`.
 
 | Category | Tools |
 |---|---|
-| **session** (4) | `session_list`, `session_new`, `session_attach`, `session_close` |
+| **session** (4) | `session_list`, `session_new`, `session_attach`, `session_close` (`session_attach` **implemented v1.4.0** — attach by id or title, attach-or-create, rehydrates a closed session's captured history from disk) |
 | **pages** (8) | `page_list`, `page_new`, `page_select`, `page_close`, `page_navigate`, `page_back`, `page_forward`, `page_reload` |
 | **input** (8) | `click(uid)`, `hover(uid)`, `type(uid,text)`, `fill_form(fields[])`, `drag(from,to)`, `key("Ctrl+Enter")`, `scroll`, `upload_file(uid,paths)` |
 | **snapshot** (3) | `snapshot_take`, `snapshot_diff`, `wait_for` |
@@ -306,7 +329,7 @@ HTTP+SSE bridge עם bearer token - אופציונלי ב-M4.
 6. **Multiple sessions × Chrome process** - `browser.createBrowserContext()` פר session ל-cookie isolation, או user-data-dir פר session? להחליט ב-M0.
 7. **docker exec -i stdio** - pino logs חייבים ל-file בלבד, אסור לזהם stdout (פורמט MCP).
 8. **Blob path leakage** - tool שמחזיר path של `/var/lib/...` - להוסיף `--blob-host-prefix` שמתרגם ל-host path אם Claude רץ host-side.
-9. **Re-attach across Claude sessions** - האם Claude שולח אותו session ID בהמשך שיחה? אם לא - `session_attach` לפי title (M4).
+9. ~~**Re-attach across Claude sessions**~~ - **Resolved (v1.4.0).** `session_attach` re-attaches by id or by title (attach-or-create, rehydrating captured history from disk), and the HTTP bridge honors an `x-lc-session` reconnect header — so a client can return to the same session regardless of whether it re-sends the same id.
 10. **Secret redaction false negatives ב-`external`** - URL host vs JSON body שמכיל URLs - לבדוק עם fixture של תגובות אמיתיות.
 
 ---

@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { getLogger } from "@shared/logger.js";
 import type { DaemonClient } from "./daemon-client.js";
+import type { ToolContext } from "./tools/ToolDefinition.js";
 import { McpResponse } from "./response/McpResponse.js";
 import { registerResourceHandlers } from "./resources/handlers.js";
 import { allTools, getTool, selectTools, type ToolMode } from "./tools/tools.js";
@@ -27,7 +28,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<void> {
   const server = new Server(
     {
       name: opts.serverName ?? "lean-chronoscope-mcp",
-      version: opts.serverVersion ?? "1.3.0",
+      version: opts.serverVersion ?? "1.4.0",
     },
     {
       capabilities: {
@@ -36,6 +37,10 @@ export async function startMcpServer(opts: McpServerOptions): Promise<void> {
       },
     },
   );
+
+  // One mutable context per connection so `session_attach` can switch the active
+  // session for every subsequent tool call.
+  const conn: ToolContext = { sessionId: opts.sessionId, daemon: opts.daemon };
 
   registerResourceHandlers({
     server,
@@ -70,10 +75,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<void> {
         .build() as never;
     }
     try {
-      const result = await tool.handler(parsed.data, {
-        sessionId: opts.sessionId,
-        daemon: opts.daemon,
-      });
+      const result = await tool.handler(parsed.data, conn);
       return result as never;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

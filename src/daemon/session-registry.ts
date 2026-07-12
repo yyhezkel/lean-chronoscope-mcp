@@ -1,5 +1,5 @@
 import type { Browser, BrowserContext, Frame, Page } from "puppeteer-core";
-import { nextPageId } from "@shared/ids.js";
+import { nextPageId, assertSafeSessionId } from "@shared/ids.js";
 import { DaemonError } from "@shared/errors.js";
 import { env } from "@shared/env.js";
 import { getLogger } from "@shared/logger.js";
@@ -44,6 +44,8 @@ export interface Session {
   sizeBytes: number;
   sizeComputedAt: number;
   source: SessionSource | null;
+  /** Optional human-friendly name for attach-by-title. */
+  title: string | null;
   db: SessionDb;
   blobs: BlobStore;
   writer: SessionWriter;
@@ -68,10 +70,31 @@ export class SessionRegistry {
   async ensure(
     sessionId: string,
     source?: SessionSource,
+    title?: string,
     dataDir?: string,
   ): Promise<{ session: Session; created: boolean }> {
+    try {
+      assertSafeSessionId(sessionId);
+    } catch (err) {
+      throw DaemonError.invalidParams((err as Error).message);
+    }
+
     const existing = this.sessions.get(sessionId);
-    if (existing) return { session: existing, created: false };
+    if (existing) {
+      // Late-supplied title (e.g. attach names an already-live session).
+      if (title && !existing.title) {
+        existing.title = title;
+        this.registry?.upsertOpen({
+          id: existing.id,
+          createdAt: existing.createdAt,
+          lastActivity: existing.lastActivity,
+          source: existing.source,
+          dataDir: existing.db.dbPath,
+          title,
+        });
+      }
+      return { session: existing, created: false };
+    }
 
     const context = await this.browser.createBrowserContext();
     const db = openSessionDb(sessionId, dataDir);
@@ -91,6 +114,7 @@ export class SessionRegistry {
       sizeBytes: 0,
       sizeComputedAt: 0,
       source: source ?? null,
+      title: title ?? null,
       db,
       blobs,
       writer,
@@ -104,6 +128,7 @@ export class SessionRegistry {
       lastActivity: now,
       source: source ?? null,
       dataDir: db.dbPath,
+      title: title ?? null,
     });
     log.info({ sessionId, source }, "session created");
     this.broadcast(buildUri({ kind: "sessions" }), "sessions");

@@ -281,8 +281,8 @@ export class SessionWriter {
    * back to the OS via incremental_vacuum (cheap, bounded, non-locking).
    *
    * Called only from the reaper tick (cold path), guarded by inFlight===0.
-   * Note: pruned network rows may leave orphaned blob files (res_body_blob);
-   * those are reclaimed wholesale when the age sweep drops the session dir.
+   * After deleting rows it sweeps now-orphaned blob files (dedup-safe — a blob
+   * is removed only when no surviving row references its sha).
    */
   prune(): void {
     const maxConsole = Number(env("MAX_CONSOLE") ?? 50_000);
@@ -290,21 +290,22 @@ export class SessionWriter {
     const maxSnapPerPage = Number(env("MAX_SNAPSHOTS_PER_PAGE") ?? 10);
 
     const tx = this.db.transaction(() => {
+      let n = 0;
       if (maxConsole > 0) {
-        this.db
+        n += this.db
           .prepare(
             `DELETE FROM console_messages WHERE id NOT IN (
                SELECT id FROM console_messages ORDER BY id DESC LIMIT ?)`,
           )
-          .run(maxConsole);
+          .run(maxConsole).changes;
       }
       if (maxNetwork > 0) {
-        this.db
+        n += this.db
           .prepare(
             `DELETE FROM network_requests WHERE id NOT IN (
                SELECT id FROM network_requests ORDER BY id DESC LIMIT ?)`,
           )
-          .run(maxNetwork);
+          .run(maxNetwork).changes;
       }
       if (maxSnapPerPage > 0) {
         // Rank each page's snapshots newest-first; surplus = rank > N. Null out
@@ -317,15 +318,41 @@ export class SessionWriter {
         this.db.prepare(`UPDATE snapshots SET parent_id = NULL WHERE parent_id IN (${surplus})`).run(
           maxSnapPerPage,
         );
-        this.db.prepare(`DELETE FROM snapshots WHERE id IN (${surplus})`).run(maxSnapPerPage);
+        n += this.db.prepare(`DELETE FROM snapshots WHERE id IN (${surplus})`).run(maxSnapPerPage).changes;
       }
+      return n;
     });
-    tx();
+    const deleted = tx() as number;
+
+    // Only walk the blob dir when rows actually went away. Console/network are
+    // the only tables that spill blobs; a deleted row may have orphaned its
+    // stack/args/body blob.
+    if (deleted > 0) {
+      this.blobs.sweepUnreferenced(this.referencedBlobShas());
+    }
 
     try {
       this.db.pragma("incremental_vacuum(1000)");
     } catch {
       /* no-op unless auto_vacuum=INCREMENTAL was enabled at create */
     }
+  }
+
+  /**
+   * Every blob sha still referenced by a row. Blobs come only from the 4
+   * spill columns (snapshots.tree_blob / exceptions.stack are inline TEXT).
+   */
+  private referencedBlobShas(): Set<string> {
+    const set = new Set<string>();
+    const add = (sql: string) => {
+      for (const r of this.db.prepare(sql).all() as Array<{ s: string | null }>) {
+        if (r.s) set.add(r.s);
+      }
+    };
+    add(`SELECT DISTINCT stack_blob AS s FROM console_messages WHERE stack_blob IS NOT NULL`);
+    add(`SELECT DISTINCT args_blob AS s FROM console_messages WHERE args_blob IS NOT NULL`);
+    add(`SELECT DISTINCT req_body_blob AS s FROM network_requests WHERE req_body_blob IS NOT NULL`);
+    add(`SELECT DISTINCT res_body_blob AS s FROM network_requests WHERE res_body_blob IS NOT NULL`);
+    return set;
   }
 }

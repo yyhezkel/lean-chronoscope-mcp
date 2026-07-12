@@ -8,7 +8,7 @@ Token-efficient browser MCP server: a long-running headless Chrome in Docker, sh
 
 Architecture: split between a **daemon** (owns Chrome + SQLite) and a per-Claude-session **mcp-server** (stdio), talking over a Unix socket with NDJSON JSON-RPC. Capture-everything firehose into per-session SQLite at `/var/lib/lean-chronoscope/sessions/<id>/db.sqlite`; tools are queries on top.
 
-Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current state: **v1.3.0 — M0–M6 + full tool surface + session lifecycle/retention**, 56 tools (session/page lifecycle, input incl. upload_file, snapshot+diff, screenshot, console+search, network+search+wait, intercept, storage, script_evaluate, emulation, waits, daemon_status). Session management: a persistent cross-session `registry.sqlite` (survives daemon restarts, reconciled at boot), correct size accounting on `session_list`/`daemon_status` (db+wal+shm+blobs, with `dbBytes`/`blobBytes` breakdown; `session_list` takes `includeClosed`), and a background **reaper** that evicts idle/oversized sessions, prunes console/network/snapshot rows, and runs the age-retention sweep hourly. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
+Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current state: **v1.4.0 — M0–M6 + full tool surface + session lifecycle/retention + session reuse**, 57 tools (session/page lifecycle incl. `session_attach`, input incl. upload_file, snapshot+diff, screenshot, console+search, network+search+wait, intercept, storage, script_evaluate, emulation, waits, daemon_status). Session management: a persistent cross-session `registry.sqlite` (survives daemon restarts, reconciled at boot; sessions can carry an optional `title`), correct size accounting on `session_list`/`daemon_status` (db+wal+shm+blobs, with `dbBytes`/`blobBytes` breakdown; `session_list` takes `includeClosed` and returns `title`), and a background **reaper** that evicts idle/oversized sessions, prunes console/network/snapshot rows (now also GC-ing orphaned blob files), and runs the age-retention sweep hourly. Sessions can be re-attached across connections by id or title (`session_attach`), rehydrating a closed session's captured history from disk. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Run / dev
 
@@ -44,7 +44,18 @@ curl -s http://127.0.0.1:8780/health   # {"ok":true,...} (no auth)
 Tools surface as `mcp__lean-chronoscope__*` after a session restart. The bridge mints
 a fresh browser session per HTTP MCP session (recorded with `source='http'`), and
 its `transport.onclose` now closes that daemon session so BrowserContexts/SQLite
-don't leak on client disconnect. The bearer token lives in
+don't leak on client disconnect.
+
+**Session persistence on reconnect:** the bridge honors a client-supplied
+`x-lc-session: <id>` request header — reconnecting with the same header returns
+to the same daemon session (rehydrated from disk if the earlier disconnect closed
+it) instead of getting a fresh random `http-<rand>` id. No header → random id as
+before. Session ids from untrusted callers (this header, and `session_attach`'s
+`sessionId`) are validated by `assertSafeSessionId()` in the daemon's `ensure`,
+which rejects ids containing `/`, `\`, `..`, NUL, or that are empty / >200 chars —
+an id becomes a filesystem path, so this prevents traversal out of the sessions dir.
+
+The bearer token lives in
 `docker/docker-compose.yml` (`LEAN_CHRONOSCOPE_HTTP_TOKEN`, legacy
 `BROWSER_MCP_HTTP_TOKEN` still honored); rotate it there + in the
 `claude mcp add` header if needed.
@@ -53,9 +64,9 @@ don't leak on client disconnect. The bearer token lives in
 
 | Mode | flag / env | tools advertised | `tools/list` payload |
 |---|---|---|---|
-| full (default) | — | 56 | ~5,258 tok |
+| full (default) | — | 57 | ~5,350 tok |
 | slim | `--slim` / `LEAN_CHRONOSCOPE_SLIM=1` | 5 core | ~547 tok |
-| gateway | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`); the 56 stay callable by name | ~321 tok |
+| gateway | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`); the 57 stay callable by name | ~321 tok |
 
 Gateway mode advertises a 3-tool index — the model reads `tools_catalog`, fetches
 `tool_schema` only for tools it needs, then dispatches via `tools_invoke`. Reproduces
@@ -72,7 +83,24 @@ The daemon keeps a persistent `registry.sqlite` at `<dataDir>/registry.sqlite`
 background **reaper** (`setInterval`) that flushes size stats to the registry,
 evicts idle/oversized sessions (frees the BrowserContext + memory, leaves the
 on-disk dir for the age sweep), prunes over-long console/network/snapshot tables,
-and runs the age-retention sweep ~hourly. Session DBs open with
+and runs the age-retention sweep ~hourly. **Blob-GC (dedup-safe):**
+`SessionWriter.prune()` now, right after deleting old console/network rows, sweeps
+orphaned blob files — it deletes only `sessions/<id>/blobs/<sha>.bin` whose sha is
+no longer referenced by ANY surviving row (content-addressed dedup is respected: a
+shared blob stays while any row points to it), instead of leaving orphaned blobs
+until the 7-day age sweep (`BlobStore.sweepUnreferenced(keep)` + `BlobStore.remove(sha)`).
+
+**Session reuse:** sessions can carry an optional `title` (a new column in
+`registry.sqlite`, added via idempotent `ALTER TABLE`); the RPC
+`session.resolve({title})` returns the newest active session id with that title.
+The `session_attach` tool points a connection at an existing session by id or
+title and rehydrates a closed session's captured history from disk (the
+BrowserContext starts fresh — browser state isn't persisted — but all captured
+console/network/snapshot history is readable); a title matching nothing starts a
+new session carrying that title (attach-or-create). See "MCP client integration"
+for the `x-lc-session` reconnect header and the `assertSafeSessionId` traversal guard.
+
+Session DBs open with
 `auto_vacuum=INCREMENTAL` + `wal_autocheckpoint=1000` + `journal_size_limit=64MB`,
 and `wal_checkpoint(TRUNCATE)` runs on clean close so the persisted `db.sqlite`
 is complete/compact (docker-compose sets `stop_grace_period: 30s` to allow it).
@@ -95,7 +123,7 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 
 All e2e (real daemon, real Chromium, real CDP — no mocks).
 
-- **Every tool (56):** `node scripts/test-all-tools.mjs` — one shared session, checkbox/PASS-FAIL matrix, closes its session at the end. Per-tool checklist: [`docs/TOOL_TESTS.md`](docs/TOOL_TESTS.md). Simple tools are tested inline in the runner; tools needing setup live in `scripts/tools/*.mjs` with a shared `harness.mjs` + seed `fixture.mjs`.
+- **Every tool (57):** `node scripts/test-all-tools.mjs` — one shared session, checkbox/PASS-FAIL matrix, closes its session at the end. Per-tool checklist: [`docs/TOOL_TESTS.md`](docs/TOOL_TESTS.md). Simple tools are tested inline in the runner; tools needing setup live in `scripts/tools/*.mjs` with a shared `harness.mjs` + seed `fixture.mjs`.
 - **What each test covers:** [`docs/TESTS.md`](docs/TESTS.md)
 - **Pass/fail history with timestamps:** [`docs/TEST_LOG.md`](docs/TEST_LOG.md)
 - **Scripts:** `scripts/test-all-tools.mjs`, `scripts/smoke-test-*.mjs`
@@ -106,7 +134,7 @@ After each test run, append a timestamped entry to `docs/TEST_LOG.md`.
 
 ## Follow-ups
 
-Known deferrals and rough edges (screencast, session_attach, HTTP TLS, in-place Chrome relaunch, network_list redaction, etc.): [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md).
+Known deferrals and rough edges (screencast, HTTP TLS, in-place Chrome relaunch, network_list redaction, etc.): [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md).
 
 ## Gotchas
 

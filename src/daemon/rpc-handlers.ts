@@ -93,6 +93,8 @@ import type {
   SessionListParams,
   SessionListEntry,
   SessionListResult,
+  SessionResolveParams,
+  SessionResolveResult,
   NetworkWaitForParams,
   NetworkWaitForResult,
   UploadFileParams,
@@ -130,7 +132,7 @@ export interface ConnectionContext {
 import fs from "node:fs";
 
 const log = getLogger("daemon/rpc");
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 function sizeOfFile(p: string): number {
   try {
@@ -217,6 +219,8 @@ export class RpcDispatcher {
         return this.sessionList(params as SessionListParams);
       case "session.close":
         return this.sessionClose(params as SessionCloseParams);
+      case "session.resolve":
+        return this.sessionResolve(params as SessionResolveParams);
       case "wait.for":
         return this.waitFor(params as WaitForParams);
       case "network.wait_for":
@@ -349,7 +353,11 @@ export class RpcDispatcher {
 
   private async sessionEnsure(params: SessionEnsureParams): Promise<SessionEnsureResult> {
     if (!params?.sessionId) throw DaemonError.invalidParams("sessionId is required");
-    const { session, created } = await this.sessions.ensure(params.sessionId, params.source);
+    const { session, created } = await this.sessions.ensure(
+      params.sessionId,
+      params.source,
+      params.title,
+    );
     return {
       sessionId: session.id,
       currentPageId: session.selectedPageId,
@@ -451,6 +459,7 @@ export class RpcDispatcher {
   private sessionList(params?: SessionListParams): SessionListResult {
     const live: SessionListEntry[] = Array.from(this.sessions.sessions.values()).map((s) => ({
       id: s.id,
+      title: s.title,
       createdAt: s.createdAt,
       lastActivity: s.lastActivity,
       pageCount: s.pages.size,
@@ -467,6 +476,7 @@ export class RpcDispatcher {
       .filter((r) => !liveIds.has(r.id))
       .map((r) => ({
         id: r.id,
+        title: r.title,
         createdAt: r.createdAt,
         lastActivity: r.lastActivity,
         pageCount: r.pageCount,
@@ -482,6 +492,16 @@ export class RpcDispatcher {
     if (!params?.sessionId) throw DaemonError.invalidParams("sessionId is required");
     const closed = await this.sessions.closeSession(params.sessionId);
     return { sessionId: params.sessionId, closed };
+  }
+
+  private sessionResolve(params: SessionResolveParams): SessionResolveResult {
+    if (!params?.title) throw DaemonError.invalidParams("title is required");
+    // Prefer a live session (its in-memory last_activity is freshest), else the
+    // registry index (which includes closed sessions, rehydratable on attach).
+    for (const s of this.sessions.sessions.values()) {
+      if (s.title === params.title) return { sessionId: s.id };
+    }
+    return { sessionId: this.registry?.resolveByTitle(params.title) ?? null };
   }
 
   private async waitFor(p: WaitForParams): Promise<WaitForResult> {

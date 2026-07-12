@@ -1,9 +1,9 @@
-# Per-Tool Tests — all 56 MCP tools
+# Per-Tool Tests — all 57 MCP tools
 
 One control runner exercises **every** tool end-to-end (real daemon, real
 Chromium, real CDP) over a single shared session, then closes that session.
 
-- **Run:** `node scripts/test-all-tools.mjs` (exits 0 only if all 56 PASS)
+- **Run:** `node scripts/test-all-tools.mjs` (exits 0 only if all 57 PASS)
 - **Control file:** [`scripts/test-all-tools.mjs`](../scripts/test-all-tools.mjs) — owns the master tool list, the simple one-line tests, and the checkbox matrix.
 - **Complete-file tests** (tools needing real setup): [`scripts/tools/`](../scripts/tools/) — `input.mjs`, `network.mjs`, `indexeddb.mjs`, `intercept.mjs`, `snapshot.mjs`, `lifecycle.mjs`, plus `fixture.mjs` (serves the seed page via interception) and `harness.mjs` (shared RPC/assert/cleanup).
 - **Seed fixture:** [`scripts/fixtures/tool-smoke.html`](../scripts/fixtures/tool-smoke.html) — one page giving real DOM, console logs, a fetch, storage, and an IndexedDB so most tools have something genuine to act on.
@@ -15,6 +15,7 @@ _Last run: **2026-05-28T15:40Z** — **56/56 PASS** (v1.1.1)._
 ## Session
 - [x] `session_list` — lists our session — _inline_
 - [x] `session_new` — opens a page in this connection's session — _lifecycle_
+- [x] `session_attach` — attach-or-create by title (created=true); re-attaching the same title reuses it (created=false); switch back by id — _lifecycle_
 - [x] `session_close` — closes our own session at teardown (closed=true) — _inline_
 
 ## Pages
