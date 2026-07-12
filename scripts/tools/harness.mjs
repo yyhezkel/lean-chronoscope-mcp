@@ -9,7 +9,7 @@ export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export function spawnMcp(sessionId) {
   const proc = spawn(
     "docker",
-    ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", sessionId],
+    ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", sessionId],
     { stdio: ["pipe", "pipe", "inherit"] },
   );
 

@@ -16,7 +16,7 @@ async function main() {
   console.log(`# v1.1 smoke (session=${SESSION_ID})`);
   const proc = spawn(
     "docker",
-    ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", SESSION_ID],
+    ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", SESSION_ID],
     { stdio: ["pipe", "pipe", "inherit"] },
   );
   const rl = readline.createInterface({ input: proc.stdout });

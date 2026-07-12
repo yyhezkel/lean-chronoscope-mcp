@@ -4,6 +4,23 @@ Append-only. Newest run first. Format: `## <UTC timestamp> — <suite>` then per
 
 ---
 
+## 2026-07-12T17:05Z — rename + session lifecycle + registry + DB retention (v1.3.0)
+
+Full rename browser-mcp → lean-chronoscope-mcp (container/image/volumes/paths/env, `LEAN_CHRONOSCOPE_*` with legacy `BROWSER_MCP_*` fallback). New: `registry.sqlite` cross-session index, size accounting (db+wal+shm+blobs), idle+size reaper (evict-only), row pruning + VACUUM/checkpoint, clean close, HTTP-bridge leak fix.
+
+Rebuilt image `lean-chronoscope-mcp:local`; container healthy; socket `/run/lean-chronoscope/daemon.sock`; `/health` → `{"ok":true}`.
+
+- 56-tool suite (`scripts/test-all-tools.mjs`) — **56/56 PASS** (incl. `daemon_status v1.3.0`)
+- `registry.sqlite` created; closed session recorded with `status`/`source=stdio`/`size_bytes=180340`/`page_count` — **PASS**
+- Boot reconciliation: restart keeps closed row, no duplicate; orphaned 'open' → 'closed' — **PASS**
+- Reaper (aggressive `IDLE_MS=4000`, `REAPER_INTERVAL_MS=3000`): abandoned session evicted, `session_list` (live) empty, row flipped `closed`, `"reaper evicting session"` logged — **PASS**
+- `session_list { includeClosed:true }` unions closed registry rows — **PASS**
+- HTTP-bridge leak fix: `initialize` created `http-*` session `source=http` `status=open`; DELETE/transport-close → daemon `session.close` → `status=closed` (no leak) — **PASS**
+
+Summary: **56/56 tools + 5/5 lifecycle checks PASS**
+
+---
+
 ## 2026-05-29T06:30Z — gateway + regression (v1.2.0)
 
 New: `--gateway` / `BROWSER_MCP_GATEWAY=1` mode advertises 3 meta-tools (`tools_catalog`, `tool_schema`, `tools_invoke`) instead of 56; the underlying 56 stay callable by name (additive, not restrictive).

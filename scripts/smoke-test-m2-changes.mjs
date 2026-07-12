@@ -18,7 +18,7 @@ async function main() {
 
   const proc = spawn(
     "docker",
-    ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", SESSION_ID],
+    ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", SESSION_ID],
     { stdio: ["pipe", "pipe", "inherit"] },
   );
 
@@ -98,11 +98,11 @@ async function main() {
 
   // 4) Verify migration 002 created the resource_revisions table.
   console.log("\n[4] migration 002 applied (resource_revisions table)");
-  const dbPath = `/var/lib/browser-mcp/sessions/${SESSION_ID}/db.sqlite`;
+  const dbPath = `/var/lib/lean-chronoscope/sessions/${SESSION_ID}/db.sqlite`;
   const script = `const D=require('better-sqlite3');const db=D(${JSON.stringify(dbPath)},{readonly:true});const rows=db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();console.log(JSON.stringify(rows.map(r=>r.name)));`;
   const dbq = spawnSync(
     "docker",
-    ["exec", "-w", "/app", "browser-mcp", "node", "-e", script],
+    ["exec", "-w", "/app", "lean-chronoscope-mcp", "node", "-e", script],
     { encoding: "utf8" },
   );
   const stdout = (dbq.stdout || "").trim();

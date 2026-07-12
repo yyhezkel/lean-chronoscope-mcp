@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 const script = `
 import net from "node:net";
 
-const SOCKET = "/run/browser-mcp/daemon.sock";
+const SOCKET = "/run/lean-chronoscope/daemon.sock";
 let nextId = 1;
 const sock = net.createConnection(SOCKET);
 let buf = "";
@@ -69,7 +69,7 @@ main().catch((e) => { console.error(e.message); process.exit(1); });
 
 const proc = spawn(
   "docker",
-  ["exec", "-i", "browser-mcp", "node", "--input-type=module", "-e", script],
+  ["exec", "-i", "lean-chronoscope-mcp", "node", "--input-type=module", "-e", script],
   { stdio: ["pipe", "pipe", "inherit"] },
 );
 

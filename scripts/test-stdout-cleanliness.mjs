@@ -8,7 +8,7 @@ import readline from "node:readline";
 
 const proc = spawn(
   "docker",
-  ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", "stdout-test"],
+  ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", "stdout-test"],
   { stdio: ["pipe", "pipe", "pipe"] },
 );
 

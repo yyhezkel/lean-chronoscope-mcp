@@ -4,14 +4,17 @@
  *   - "all":     redact everywhere (paranoia mode, e.g. demos / screen-recordings)
  *   - "external": redact requests/responses going to hosts NOT in trustedDomains
  *                 (default: localhost, 127.0.0.1, ::1). Add your own hosts via
- *                 BROWSER_MCP_TRUSTED_DOMAINS. Treats trusted hosts as safe;
+ *                 LEAN_CHRONOSCOPE_TRUSTED_DOMAINS. Treats trusted hosts as safe;
  *                 everything else is dirty.
  *   - "none":    no redaction (raw passthrough)
  *
- * Configuration via env (read once at MCP-server start):
- *   BROWSER_MCP_REDACT_MODE=all|external|none     (default: external)
- *   BROWSER_MCP_TRUSTED_DOMAINS=a.com,b.org       (comma-separated, replaces defaults)
+ * Configuration via env (read once at MCP-server start; legacy BROWSER_MCP_*
+ * names still honored as a fallback):
+ *   LEAN_CHRONOSCOPE_REDACT_MODE=all|external|none  (default: external)
+ *   LEAN_CHRONOSCOPE_TRUSTED_DOMAINS=a.com,b.org    (comma-separated, replaces defaults)
  */
+
+import { env } from "./env.js";
 
 export type RedactMode = "all" | "external" | "none";
 
@@ -61,12 +64,12 @@ const BODY_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
 ];
 
 export function loadRedactConfigFromEnv(): RedactConfig {
-  const rawMode = (process.env.BROWSER_MCP_REDACT_MODE ?? "external").toLowerCase();
+  const rawMode = (env("REDACT_MODE") ?? "external").toLowerCase();
   const mode: RedactMode =
     rawMode === "all" || rawMode === "none" || rawMode === "external"
       ? (rawMode as RedactMode)
       : "external";
-  const trustedFromEnv = process.env.BROWSER_MCP_TRUSTED_DOMAINS;
+  const trustedFromEnv = env("TRUSTED_DOMAINS");
   const trustedDomains = trustedFromEnv
     ? trustedFromEnv
         .split(",")

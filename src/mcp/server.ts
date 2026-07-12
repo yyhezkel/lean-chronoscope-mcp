@@ -27,7 +27,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<void> {
   const server = new Server(
     {
       name: opts.serverName ?? "lean-chronoscope-mcp",
-      version: opts.serverVersion ?? "1.2.0",
+      version: opts.serverVersion ?? "1.3.0",
     },
     {
       capabilities: {

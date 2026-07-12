@@ -31,7 +31,7 @@ export interface HttpBridgeOptions {
 /**
  * Optional HTTP+SSE bridge for clients that can't `docker exec -i` (e.g. a
  * laptop hitting the server directly). Spins up one `Server` instance per
- * HTTP MCP session — the transport's session ID maps 1:1 to the browser-mcp
+ * HTTP MCP session — the transport's session ID maps 1:1 to the lean-chronoscope
  * `sessionId`. Bearer-token auth is mandatory.
  *
  * Bind to 127.0.0.1 unless a TLS-terminating proxy is in front. There is no
@@ -78,7 +78,15 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       transport.onclose = () => {
         const closeSid = transport!.sessionId;
         if (closeSid) sessionTransports.delete(closeSid);
-        log.info({ sid: closeSid }, "HTTP MCP session closed");
+        // Close the daemon-side browser session too, otherwise the BrowserContext
+        // + SQLite + on-disk dir leak until daemon restart or the age sweep.
+        // closeSession is idempotent, so racing the reaper is harmless.
+        void opts.daemon
+          .call("session.close", { sessionId: browserMcpSession })
+          .catch((err) =>
+            log.warn({ err, browserMcpSession }, "session.close on transport close failed"),
+          );
+        log.info({ sid: closeSid, browserMcpSession }, "HTTP MCP session closed");
       };
     }
 
@@ -110,10 +118,10 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
 }
 
 async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMode): Promise<Server> {
-  await daemon.call("session.ensure", { sessionId });
+  await daemon.call("session.ensure", { sessionId, source: "http" });
   const advertised = selectTools(mode);
   const server = new Server(
-    { name: "lean-chronoscope-mcp", version: "1.2.0" },
+    { name: "lean-chronoscope-mcp", version: "1.3.0" },
     { capabilities: { tools: {}, resources: { subscribe: true, listChanged: true } } },
   );
   registerResourceHandlers({ server, daemon, sessionId, allTools });

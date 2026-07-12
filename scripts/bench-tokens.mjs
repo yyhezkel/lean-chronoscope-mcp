@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Token/context benchmark for browser-mcp. Runs a representative task against
+// Token/context benchmark for lean-chronoscope-mcp. Runs a representative task against
 // the live daemon and reports the model-visible output size (chars + ~chars/4
 // token estimate) per tool call, plus the fixed tool-schema mount overhead.
 //
@@ -35,7 +35,7 @@ await run("network_list", "network_list", {});
 await callTool("session_close", {});
 await mcp.close();
 
-console.log(`\n# browser-mcp token benchmark — ${URL}\n`);
+console.log(`\n# lean-chronoscope-mcp token benchmark — ${URL}\n`);
 console.log(`Mount overhead: ${tools.length} tools, ${schemaChars} chars (~${tok(JSON.stringify(tools))} tok)\n`);
 console.log("Call            chars     ~tokens");
 let total = 0;

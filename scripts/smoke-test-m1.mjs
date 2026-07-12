@@ -9,7 +9,7 @@ const sessionId = process.env.SMOKE_SESSION ?? "m1-smoke";
 
 const proc = spawn(
   "docker",
-  ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", sessionId],
+  ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", sessionId],
   { stdio: ["pipe", "pipe", "inherit"] },
 );
 

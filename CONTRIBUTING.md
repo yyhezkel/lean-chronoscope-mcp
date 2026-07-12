@@ -63,7 +63,7 @@ The MCP-server `CallToolRequestSchema` handler already resolves any tool via `ge
 
 ## Reporting issues / proposing changes
 
-- File an issue with a reproducer (browser-mcp logs + the failing tool call when applicable).
+- File an issue with a reproducer (lean-chronoscope-mcp logs + the failing tool call when applicable).
 - Security issues: please email instead of opening a public issue (contact in commit metadata).
 
 ## License

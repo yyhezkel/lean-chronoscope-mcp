@@ -1,8 +1,12 @@
 import type { Browser, BrowserContext, Frame, Page } from "puppeteer-core";
 import { nextPageId } from "@shared/ids.js";
 import { DaemonError } from "@shared/errors.js";
+import { env } from "@shared/env.js";
 import { getLogger } from "@shared/logger.js";
+import type { SessionSource } from "@shared/protocol.js";
 import { openSessionDb, type SessionDb } from "./storage/db.js";
+import { sessionSizeBytes } from "./storage/size.js";
+import type { RegistryStore } from "./storage/registry.js";
 import { BlobStore } from "./storage/blobs.js";
 import { SessionWriter } from "./storage/writer.js";
 import { SessionReader } from "./storage/reader.js";
@@ -32,6 +36,14 @@ export interface Session {
   pages: Map<string, PageState>;
   selectedPageId: string | null;
   createdAt: number;
+  /** ms of the last RPC touching this session; drives idle eviction. */
+  lastActivity: number;
+  /** Count of currently-executing RPCs — the reaper never evicts when >0. */
+  inFlight: number;
+  /** Cached total on-disk size (db+wal+shm+blobs); refreshed by the reaper tick. */
+  sizeBytes: number;
+  sizeComputedAt: number;
+  source: SessionSource | null;
   db: SessionDb;
   blobs: BlobStore;
   writer: SessionWriter;
@@ -45,6 +57,7 @@ export class SessionRegistry {
   constructor(
     private readonly browser: Browser,
     private readonly broadcaster?: Broadcaster,
+    private readonly registry?: RegistryStore,
   ) {}
 
   /** Fire-and-forget emit to broadcaster; no-op when no broadcaster is wired. */
@@ -52,7 +65,11 @@ export class SessionRegistry {
     this.broadcaster?.emit(uri, { kind });
   }
 
-  async ensure(sessionId: string, dataDir?: string): Promise<{ session: Session; created: boolean }> {
+  async ensure(
+    sessionId: string,
+    source?: SessionSource,
+    dataDir?: string,
+  ): Promise<{ session: Session; created: boolean }> {
     const existing = this.sessions.get(sessionId);
     if (existing) return { session: existing, created: false };
 
@@ -62,12 +79,18 @@ export class SessionRegistry {
     const writer = new SessionWriter(db.db, blobs);
     const reader = new SessionReader(db.db);
 
+    const now = Date.now();
     const session: Session = {
       id: sessionId,
       context,
       pages: new Map(),
       selectedPageId: null,
-      createdAt: Date.now(),
+      createdAt: now,
+      lastActivity: now,
+      inFlight: 0,
+      sizeBytes: 0,
+      sizeComputedAt: 0,
+      source: source ?? null,
       db,
       blobs,
       writer,
@@ -75,7 +98,14 @@ export class SessionRegistry {
       intercept: new InterceptionEngine(sessionId, this.broadcaster),
     };
     this.sessions.set(sessionId, session);
-    log.info({ sessionId }, "session created");
+    this.registry?.upsertOpen({
+      id: sessionId,
+      createdAt: now,
+      lastActivity: now,
+      source: source ?? null,
+      dataDir: db.dbPath,
+    });
+    log.info({ sessionId, source }, "session created");
     this.broadcast(buildUri({ kind: "sessions" }), "sessions");
     return { session, created: true };
   }
@@ -153,7 +183,19 @@ export class SessionRegistry {
     } catch (err) {
       log.warn({ err, sessionId }, "error closing session context");
     }
-    session.db.close();
+    session.db.close(); // checkpoints + truncates the WAL, so measure size after
+    let sizeBytes = session.sizeBytes;
+    try {
+      sizeBytes = sessionSizeBytes(session.db.dbPath, session.blobs);
+    } catch {
+      /* stat race — fall back to the cached value */
+    }
+    this.registry?.markClosed(sessionId, {
+      closedAt: Date.now(),
+      lastActivity: session.lastActivity,
+      sizeBytes,
+      pageCount: session.pages.size,
+    });
     this.sessions.delete(sessionId);
     this.broadcast(buildUri({ kind: "sessions" }), "sessions");
     return true;
@@ -171,8 +213,80 @@ export class SessionRegistry {
         log.warn({ err, sessionId: session.id }, "error closing session context");
       }
       session.db.close();
+      this.registry?.markClosed(session.id, {
+        closedAt: Date.now(),
+        lastActivity: session.lastActivity,
+        sizeBytes: session.sizeBytes,
+        pageCount: session.pages.size,
+      });
     }
     this.sessions.clear();
+  }
+
+  /**
+   * Periodic lifecycle tick (called by the daemon's reaper interval):
+   *   1. refresh each live session's cached size + flush stats to the registry,
+   *   2. prune old rows to bound in-session growth (only when idle of RPCs),
+   *   3. evict sessions that are idle past IDLE_MS or over SIZE_CAP_BYTES.
+   * Evict == free the BrowserContext + memory (closeSession); the on-disk dir is
+   * left for the age sweep. All per-session work is wrapped so one bad session
+   * never stalls the sweep.
+   */
+  async reapTick(): Promise<void> {
+    const idleMs = Number(env("IDLE_MS") ?? 30 * 60_000);
+    const sizeCap = Number(env("SIZE_CAP_BYTES") ?? 500 * 1024 * 1024);
+    const now = Date.now();
+    const candidates: Session[] = [];
+
+    for (const s of this.sessions.values()) {
+      let size = s.sizeBytes;
+      try {
+        size = sessionSizeBytes(s.db.dbPath, s.blobs);
+      } catch {
+        /* stat race — keep the cached value */
+      }
+      s.sizeBytes = size;
+      s.sizeComputedAt = now;
+      this.registry?.updateStats(s.id, {
+        lastActivity: s.lastActivity,
+        sizeBytes: size,
+        pageCount: s.pages.size,
+      });
+      // Prune only when no RPC is in flight (a concurrent DELETE + a long
+      // read could contend / surprise a caller).
+      if (s.inFlight === 0) {
+        try {
+          s.writer.prune();
+        } catch (err) {
+          log.warn({ err, sessionId: s.id }, "prune failed");
+        }
+      }
+      const idle = now - s.lastActivity >= idleMs;
+      const tooBig = sizeCap > 0 && size >= sizeCap;
+      if (idle || tooBig) candidates.push(s);
+    }
+
+    for (const s of candidates) {
+      try {
+        await this.maybeEvict(s, idleMs, sizeCap);
+      } catch (err) {
+        log.warn({ err, sessionId: s.id }, "reaper evict failed");
+      }
+    }
+  }
+
+  /** Re-check the guards under fresh state, then evict. */
+  private async maybeEvict(s: Session, idleMs: number, sizeCap: number): Promise<void> {
+    if (s.inFlight > 0) return; // an RPC (e.g. a 120s wait.for) is mid-flight
+    const now = Date.now();
+    const idle = now - s.lastActivity >= idleMs;
+    const tooBig = sizeCap > 0 && s.sizeBytes >= sizeCap;
+    if (!idle && !tooBig) return; // activity arrived during the size walk
+    log.info(
+      { sessionId: s.id, idle, tooBig, sizeBytes: s.sizeBytes, source: s.source },
+      "reaper evicting session",
+    );
+    await this.closeSession(s.id); // also writes registry.markClosed
   }
 
   private async attachCollectorsAndNavTracking(

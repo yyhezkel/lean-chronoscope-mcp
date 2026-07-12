@@ -1,4 +1,4 @@
--- Schema v1. Per-session SQLite at /var/lib/browser-mcp/sessions/<id>/db.sqlite.
+-- Schema v1. Per-session SQLite at /var/lib/lean-chronoscope/sessions/<id>/db.sqlite.
 -- PRAGMAs are set in db.ts before this migration runs (cannot be set inside a transaction).
 
 CREATE TABLE IF NOT EXISTS meta (

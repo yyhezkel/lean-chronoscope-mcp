@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // M2.3 smoke: verify collectors broadcast on console/network/snapshot/url after writes.
 // Run inside container:
-//   docker exec -i browser-mcp node /tmp/smoke-test-m2-collectors.mjs
+//   docker exec -i lean-chronoscope-mcp node /tmp/smoke-test-m2-collectors.mjs
 
 import net from "node:net";
 import readline from "node:readline";
 
-const SOCKET_PATH = process.env.BROWSER_MCP_SOCKET ?? "/run/browser-mcp/daemon.sock";
+const SOCKET_PATH = process.env.LEAN_CHRONOSCOPE_SOCKET ?? "/run/lean-chronoscope/daemon.sock";
 const SESSION_ID = process.env.SMOKE_SESSION ?? `m2-collectors-${Date.now()}`;
 
 function connect(path) {

@@ -5,14 +5,14 @@
 // arrives via the same socket.
 //
 // Run inside the container:
-//   docker exec -i browser-mcp node /app/scripts/smoke-test-m2.mjs
+//   docker exec -i lean-chronoscope-mcp node /app/scripts/smoke-test-m2.mjs
 // or from outside (mounting via host fs):
-//   docker exec -i browser-mcp node - < scripts/smoke-test-m2.mjs
+//   docker exec -i lean-chronoscope-mcp node - < scripts/smoke-test-m2.mjs
 
 import net from "node:net";
 import readline from "node:readline";
 
-const SOCKET_PATH = process.env.BROWSER_MCP_SOCKET ?? "/run/browser-mcp/daemon.sock";
+const SOCKET_PATH = process.env.LEAN_CHRONOSCOPE_SOCKET ?? "/run/lean-chronoscope/daemon.sock";
 const SESSION_ID = process.env.SMOKE_SESSION ?? "m2-smoke";
 
 function connect(path) {

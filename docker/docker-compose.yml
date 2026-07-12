@@ -1,10 +1,10 @@
 services:
-  browser-mcp:
+  lean-chronoscope-mcp:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: browser-mcp:local
-    container_name: browser-mcp
+    image: lean-chronoscope-mcp:local
+    container_name: lean-chronoscope-mcp
     restart: unless-stopped
     init: true
     shm_size: "2gb"
@@ -13,26 +13,36 @@ services:
     ports:
       - "127.0.0.1:8780:8780"
     volumes:
-      - browser-mcp-data:/var/lib/browser-mcp
-      - browser-mcp-run:/run/browser-mcp
-      - browser-mcp-log:/var/log/browser-mcp
+      - lean-chronoscope-data:/var/lib/lean-chronoscope
+      - lean-chronoscope-run:/run/lean-chronoscope
+      - lean-chronoscope-log:/var/log/lean-chronoscope
+    # Give in-flight sessions time to checkpoint their WAL + close cleanly on
+    # `docker stop` before SIGKILL. Bump if you run many concurrent sessions.
+    stop_grace_period: 30s
     environment:
       - CHROME_BIN=/usr/bin/google-chrome
-      - BROWSER_MCP_DATA_DIR=/var/lib/browser-mcp
-      - BROWSER_MCP_SOCKET=/run/browser-mcp/daemon.sock
-      - BROWSER_MCP_LOG_DIR=/var/log/browser-mcp
-      - BROWSER_MCP_LOG_LEVEL=info
+      - LEAN_CHRONOSCOPE_DATA_DIR=/var/lib/lean-chronoscope
+      - LEAN_CHRONOSCOPE_SOCKET=/run/lean-chronoscope/daemon.sock
+      - LEAN_CHRONOSCOPE_LOG_DIR=/var/log/lean-chronoscope
+      - LEAN_CHRONOSCOPE_LOG_LEVEL=info
       # HTTP bridge: bind all interfaces *inside* the container (the publish
       # above restricts host exposure to loopback). Bearer token required.
       # Generate a token (e.g. `openssl rand -base64 32`) and put it in .env
-      # next to this file as: BROWSER_MCP_HTTP_TOKEN=<your-token>
-      - BROWSER_MCP_HTTP_TOKEN=${BROWSER_MCP_HTTP_TOKEN:?set BROWSER_MCP_HTTP_TOKEN in docker/.env}
-      - BROWSER_MCP_HTTP_HOST=0.0.0.0
-      - BROWSER_MCP_HTTP_PORT=8780
+      # next to this file as: LEAN_CHRONOSCOPE_HTTP_TOKEN=<your-token>
+      # (legacy BROWSER_MCP_HTTP_TOKEN in .env is still honored as a fallback).
+      - LEAN_CHRONOSCOPE_HTTP_TOKEN=${LEAN_CHRONOSCOPE_HTTP_TOKEN:-${BROWSER_MCP_HTTP_TOKEN:?set LEAN_CHRONOSCOPE_HTTP_TOKEN in docker/.env}}
+      - LEAN_CHRONOSCOPE_HTTP_HOST=0.0.0.0
+      - LEAN_CHRONOSCOPE_HTTP_PORT=8780
       # Optional tool-surface mode for the HTTP bridge: "full" (default), "slim",
       # or "gateway" (3 meta-tools instead of 56 — see docs/COMPARISON.md).
-      - BROWSER_MCP_GATEWAY=${BROWSER_MCP_GATEWAY:-}
-      - BROWSER_MCP_SLIM=${BROWSER_MCP_SLIM:-}
+      - LEAN_CHRONOSCOPE_GATEWAY=${LEAN_CHRONOSCOPE_GATEWAY:-${BROWSER_MCP_GATEWAY:-}}
+      - LEAN_CHRONOSCOPE_SLIM=${LEAN_CHRONOSCOPE_SLIM:-${BROWSER_MCP_SLIM:-}}
+      # Optional session-lifecycle knobs (defaults shown). Set REAPER_INTERVAL_MS=0
+      # to disable the idle/size reaper entirely.
+      # - LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS=60000
+      # - LEAN_CHRONOSCOPE_IDLE_MS=1800000
+      # - LEAN_CHRONOSCOPE_SIZE_CAP_BYTES=524288000
+      # - LEAN_CHRONOSCOPE_RETENTION_DAYS=7
     healthcheck:
       test: ["CMD", "/healthcheck.sh"]
       interval: 30s
@@ -41,6 +51,6 @@ services:
       start_period: 15s
 
 volumes:
-  browser-mcp-data:
-  browser-mcp-run:
-  browser-mcp-log:
+  lean-chronoscope-data:
+  lean-chronoscope-run:
+  lean-chronoscope-log:

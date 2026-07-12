@@ -1,5 +1,5 @@
 #!/bin/sh
 # Health: daemon socket exists and is connectable.
-SOCKET="${BROWSER_MCP_SOCKET:-/run/browser-mcp/daemon.sock}"
+SOCKET="${LEAN_CHRONOSCOPE_SOCKET:-${BROWSER_MCP_SOCKET:-/run/lean-chronoscope/daemon.sock}}"
 test -S "$SOCKET" || exit 1
 exit 0

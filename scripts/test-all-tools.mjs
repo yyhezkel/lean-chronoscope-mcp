@@ -6,7 +6,7 @@
 // Simple tools are tested inline below; tools that need real setup live in
 // their own files under scripts/tools/ and are imported here.
 //
-//   docker cp scripts/fixtures/upload.txt browser-mcp:/tmp/tool-upload.txt   # (done automatically)
+//   docker cp scripts/fixtures/upload.txt lean-chronoscope-mcp:/tmp/tool-upload.txt   # (done automatically)
 //   node scripts/test-all-tools.mjs
 //
 // Exits 0 only when every tool PASSes.
@@ -54,7 +54,7 @@ async function main() {
   // Place the upload fixture inside the container for upload_file.
   try {
     const local = fileURLToPath(new URL("./fixtures/upload.txt", import.meta.url));
-    execSync(`docker cp "${local}" browser-mcp:${CONTAINER_UPLOAD}`, { stdio: "ignore" });
+    execSync(`docker cp "${local}" lean-chronoscope-mcp:${CONTAINER_UPLOAD}`, { stdio: "ignore" });
   } catch (e) {
     console.error("warn: could not copy upload fixture:", e.message);
   }

@@ -1,4 +1,10 @@
-# Browser MCP Server — Implementation Plan
+# lean-chronoscope-mcp — Implementation Plan
+
+> **State: v1.3.0** — M0–M6 shipped plus the session-lifecycle layer (persistent
+> `registry.sqlite`, correct size accounting, and the background reaper for
+> idle/size eviction + row pruning + hourly age-retention). Sections below that
+> were originally written as "planned" for the registry and retention are now
+> **implemented** — see the notes inline.
 
 ## Context
 
@@ -20,7 +26,7 @@ A long-running headless-Chrome MCP server in Docker for **live debugging of web 
 
 ```
                       ┌──────────────────────────────────────────────────────┐
-                      │  Docker container: browser-mcp                       │
+                      │  Docker container: lean-chronoscope-mcp              │
    Claude Code        │   ┌────────────────┐   Unix socket    ┌──────────┐  │
    (server/SSH'd)  ───┼──►│  mcp-server    │  NDJSON JSON-RPC │ daemon   │  │
    stdio MCP          │   │  (per session) │ ◄───────────────►│ (single) │  │
@@ -32,7 +38,7 @@ A long-running headless-Chrome MCP server in Docker for **live debugging of web 
                       │   └────────────────┘                  │   ceptor │  │
                       │           │                           └──────────┘  │
                       │           ▼                                 │       │
-                      │   /var/lib/browser-mcp/sessions/<id>/db.sqlite      │
+                      │   /var/lib/lean-chronoscope/sessions/<id>/db.sqlite │
                       │                                  /blobs/<sha256>   │
                       └──────────────────────────────────────────────────────┘
 ```
@@ -43,7 +49,7 @@ A long-running headless-Chrome MCP server in Docker for **live debugging of web 
 - **SDK:** `@modelcontextprotocol/sdk` ^1.29.
 - **DB:** `better-sqlite3` (sync, fast, no await in hot paths).
 - **Schema:** zod.
-- **Logging:** pino → `/var/log/browser-mcp/`.
+- **Logging:** pino → `/var/log/lean-chronoscope/lean-chronoscope.log`.
 
 **Why daemon split:** הדפדפן הוא ה-long-lived asset, לא ה-MCP. session ארוך-חיים שורד restart של Claude, מסך כחול של קלינט, חיבור מחדש למחר. Mirrors `chrome-devtools-mcp/src/daemon/` אבל הופך את הכיוון: שם ה-daemon מפעיל child stdio MCP; אצלנו ה-MCP server הוא לקוח של ה-daemon.
 
@@ -54,7 +60,7 @@ A long-running headless-Chrome MCP server in Docker for **live debugging of web 
 חדש ב-`/home/runner/browser-mcp/`:
 
 ```
-browser-mcp/
+lean-chronoscope-mcp/
 ├── package.json                      # pnpm, Node 22, puppeteer-core, mcp sdk, better-sqlite3
 ├── tsconfig.json                     # strict, NodeNext, paths: @shared @daemon @mcp
 ├── docker/
@@ -94,7 +100,7 @@ browser-mcp/
 │   │   │   ├── writer.ts             # insertEvent/Network/Console (sync, no await)
 │   │   │   ├── reader.ts             # paginated queries
 │   │   │   ├── blobs.ts              # content-addressed sha256 store
-│   │   │   ├── registry.ts           # /var/lib/browser-mcp/registry.sqlite
+│   │   │   ├── registry.ts           # /var/lib/lean-chronoscope/registry.sqlite (implemented)
 │   │   │   └── migrations/001_initial.sql
 │   │   ├── live/
 │   │   │   ├── broadcaster.ts        # per-session EventEmitter
@@ -137,7 +143,7 @@ browser-mcp/
 
 ## Daemon ↔ MCP wire protocol
 
-**Choice: Unix domain socket + NDJSON + JSON-RPC 2.0** ב-`/run/browser-mcp/daemon.sock`.
+**Choice: Unix domain socket + NDJSON + JSON-RPC 2.0** ב-`/run/lean-chronoscope/daemon.sock`.
 
 נדחו: HTTP+SSE (overkill, buffering hurts latency), TCP (Unix sockets זול יותר), gRPC (protoc/codegen ללא יתרון בשפה אחת בקונטיינר), binary custom (premature).
 
@@ -158,7 +164,7 @@ export interface DaemonNotification { jsonrpc: "2.0"; method: DaemonNotification
 
 ## SQLite schema (per session)
 
-`/var/lib/browser-mcp/sessions/<id>/db.sqlite`, WAL mode.
+`/var/lib/lean-chronoscope/sessions/<id>/db.sqlite`, WAL mode.
 
 Tables: `meta`, `pages`, `navigations`, `console_messages`, `network_requests`, `snapshots`, `snapshot_nodes`, `exceptions`, `storage_events`, `intercept_rules`, `evaluations`.
 
@@ -169,9 +175,38 @@ Tables: `meta`, `pages`, `navigations`, `console_messages`, `network_requests`, 
 - Snapshots עם `parent_id` לdiff base.
 - `intercept_rules` עם `pattern`, `action`, `hits`, `active`.
 
-Global registry ב-`/var/lib/browser-mcp/registry.sqlite`: `sessions(id, title, created_at, last_active_at, profile_dir)` ל-discovery.
+**Global registry (implemented, v1.3.0):** a persistent cross-session index at
+`/var/lib/lean-chronoscope/registry.sqlite` with a `sessions` table:
+`id, created_at, last_activity, status (open/closed), source (stdio/http),
+page_count, size_bytes, closed_at, data_dir`. It survives daemon restarts and is
+reconciled at boot — orphaned `open` rows flip to `closed`, and on-disk session
+dirs are re-indexed. `session_list` reads it (with an `includeClosed` param to
+surface closed sessions) and reports per-session `lastActivity`, `sizeBytes`
+(db+wal+shm+blobs), `status`, and `source`; `daemon_status` reports the same
+accounting plus a `dbBytes`/`blobBytes` breakdown. (The `sizeBytes` fix was a bug
+correction — previously only `db.sqlite` was counted; the old `totalRevisions`
+field was removed.)
 
-**Retention sweep job** ב-daemon על timer: שורות `console`/`network` ישנות מ-N ימים נמחקות; snapshots - 10 אחרונים פר page; sessions ישנים מ-14 יום מאורכבים ל-`/var/lib/browser-mcp/archive/<id>.tar.zst`.
+**Retention & reaper (implemented, v1.3.0):** a background reaper runs on a timer
+(`setInterval`, `LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS`, default 60000, `0` disables)
+and each tick:
+- flushes size stats to the registry and prunes old registry rows;
+- **evicts** sessions idle past `LEAN_CHRONOSCOPE_IDLE_MS` (default 30min) or over
+  `LEAN_CHRONOSCOPE_SIZE_CAP_BYTES` (default 500MB, `0` disables) — eviction frees
+  the `BrowserContext` + memory but leaves the on-disk dir for the age sweep;
+- **prunes rows** (count-based, bounds in-session growth): keeps the newest
+  `LEAN_CHRONOSCOPE_MAX_CONSOLE` (50k) console rows, `LEAN_CHRONOSCOPE_MAX_NETWORK`
+  (50k) network rows, and `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` (10) snapshots
+  per page; FTS stays in sync via triggers and freed pages are reclaimed with
+  `incremental_vacuum` (session DBs open with `auto_vacuum=INCREMENTAL`);
+- runs the **age-retention sweep** (`LEAN_CHRONOSCOPE_RETENTION_DAYS`, default 7)
+  ~hourly — not only at daemon boot — removing old session dirs and keeping the
+  registry in sync.
+
+Clean close: sessions run `PRAGMA wal_checkpoint(TRUNCATE)` before closing so the
+persisted `db.sqlite` is complete/compact; DBs also set `wal_autocheckpoint=1000`
+and `journal_size_limit=64MB`. docker-compose sets `stop_grace_period: 30s` so
+in-flight sessions checkpoint before SIGKILL.
 
 Migration: `src/daemon/storage/migrations/001_initial.sql`.
 
@@ -221,7 +256,7 @@ URI scheme: `browser://`. ה-mcp-server מצהיר עליהם, subscriptions ע�
 
 ## Docker deployment
 
-**Dockerfile** (multi-stage, `node:22-bookworm-slim` build + runtime, מתקין `google-chrome-stable` עם apt). Non-root user `mcp:1500`. Env vars: `CHROME_BIN`, `BROWSER_MCP_DATA_DIR`, `BROWSER_MCP_SOCKET`.
+**Dockerfile** (multi-stage, `node:22-bookworm-slim` build + runtime, מתקין `google-chrome-stable` עם apt). Non-root user `mcp:1500`. Env vars: `CHROME_BIN`, `LEAN_CHRONOSCOPE_DATA_DIR`, `LEAN_CHRONOSCOPE_SOCKET` (legacy `BROWSER_MCP_*` names still honored).
 
 **docker-compose.yml**: service אחד, `shm_size: 2g`, named volumes ל-data/run/log, port 8780 על `127.0.0.1` בלבד (לא רלוונטי ל-v1 - שמור ל-HTTP bridge ב-M4).
 
@@ -230,12 +265,12 @@ URI scheme: `browser://`. ה-mcp-server מצהיר עליהם, subscriptions ע�
 // ~/.claude/mcp.json
 {
   "mcpServers": {
-    "browser": {
+    "lean-chronoscope": {
       "command": "docker",
-      "args": ["exec", "-i", "browser-mcp",
+      "args": ["exec", "-i", "lean-chronoscope-mcp",
                "node", "/app/dist/bin/mcp.js",
                "--session", "${CLAUDE_SESSION_ID:-default}",
-               "--daemon-socket", "/run/browser-mcp/daemon.sock"]
+               "--daemon-socket", "/run/lean-chronoscope/daemon.sock"]
     }
   }
 }
@@ -333,14 +368,14 @@ HTTP+SSE bridge עם bearer token - אופציונלי ב-M4.
 
 **M0 (Walking skeleton):**
 - `cd /home/runner/browser-mcp && docker compose up --build -d`
-- `docker compose ps` → `browser-mcp` healthy
-- `docker exec browser-mcp ls /run/browser-mcp/daemon.sock` → קיים
-- `docker exec -i browser-mcp node /app/dist/bin/mcp.js --session test < <(echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}')` → תגובה תקינה
+- `docker compose ps` → `lean-chronoscope-mcp` healthy
+- `docker exec lean-chronoscope-mcp ls /run/lean-chronoscope/daemon.sock` → קיים
+- `docker exec -i lean-chronoscope-mcp node /app/dist/bin/mcp.js --session test < <(echo '{"jsonrpc":"2.0","id":1,"method":"initialize",...}')` → תגובה תקינה
 - ב-Claude Code (קונפיג mcp.json מעודכן): `Use the browser MCP to navigate to https://example.com and screenshot` → תמונה חוזרת
 
 **M1 (Storage + capture):**
 - Navigate to a local dev server, perform 5 UI actions, then:
-- `docker exec browser-mcp sqlite3 /var/lib/browser-mcp/sessions/test/db.sqlite 'SELECT count(*) FROM console_messages'` → >0
+- `docker exec lean-chronoscope-mcp sqlite3 /var/lib/lean-chronoscope/sessions/test/db.sqlite 'SELECT count(*) FROM console_messages'` → >0
 - `Use console_list` ב-Claude → מחזיר עם reqid+pagination
 - `Use console_get` עם reqid → stack מלא
 - בלאסטית: navigate ל-page heavy (gmail/youtube) ל-30 שניות → אין SQLite contention/crash
@@ -349,7 +384,7 @@ HTTP+SSE bridge עם bearer token - אופציונלי ב-M4.
 
 **M2 (Live resources):**
 - ב-Claude: `Subscribe to browser://session/test/page/p_1/console/live`
-- בvolume אחר: `docker exec browser-mcp node -e 'fetch("...")'` שמדפיס ל-console
+- בvolume אחר: `docker exec lean-chronoscope-mcp node -e 'fetch("...")'` שמדפיס ל-console
 - Claude מקבל `notifications/resources/updated` מיד (debounced 200ms)
 
 **M3 (Interception + storage):**
@@ -361,7 +396,7 @@ HTTP+SSE bridge עם bearer token - אופציונלי ב-M4.
 **M4 (Multi-session):**
 - שני terminals של Claude Code עם `CLAUDE_SESSION_ID=a` ו-`=b`
 - כל אחד מנווט לפרויקט אחר → לא משפיעים זה על זה (cookie/storage isolation דרך `createBrowserContext`)
-- `docker compose restart browser-mcp` → `session_attach a` → דף עדיין שם, history של console נשמרת
+- `docker compose restart lean-chronoscope-mcp` → `session_attach a` → דף עדיין שם, history של console נשמרת
 
 **M5+:**
 - `snapshot_diff` חוזר על form-fill ארוך → טוקנים פר call יורדים ב-≥10x מול snapshot_take מלא

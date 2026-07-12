@@ -24,11 +24,23 @@ export function openSessionDb(sessionId: string, dataDir?: string): SessionDb {
   const dbPath = path.join(dir, "db.sqlite");
   const db = new Database(dbPath);
 
+  // auto_vacuum must be set BEFORE any table is created to take effect on a
+  // fresh DB (it's a no-op on an existing NONE db until a full VACUUM). Setting
+  // it here — before runMigrations creates tables — enables cheap
+  // `PRAGMA incremental_vacuum` later so pruning can return pages to the OS
+  // without a locking full rewrite.
+  db.pragma("auto_vacuum = INCREMENTAL");
+
   // Pragmas before migrations.
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 2000");
+  // Bound WAL growth: checkpoint automatically every ~1000 pages (~4MB) and cap
+  // the WAL file at 64MB after a checkpoint truncates it. Limits how much
+  // un-checkpointed WAL can pile up before an abrupt (SIGKILL) daemon death.
+  db.pragma("wal_autocheckpoint = 1000");
+  db.pragma("journal_size_limit = 67108864");
 
   runMigrations(db, sessionId);
   log.info({ sessionId, dbPath }, "session db opened");
@@ -38,6 +50,13 @@ export function openSessionDb(sessionId: string, dataDir?: string): SessionDb {
     sessionId,
     dbPath,
     close: () => {
+      // Fold the WAL into the main DB and truncate it so the persisted
+      // db.sqlite is complete + compact. A kill after this loses nothing.
+      try {
+        db.pragma("wal_checkpoint(TRUNCATE)");
+      } catch (err) {
+        log.warn({ err, sessionId }, "wal_checkpoint(TRUNCATE) on close failed");
+      }
       try {
         db.close();
       } catch (err) {

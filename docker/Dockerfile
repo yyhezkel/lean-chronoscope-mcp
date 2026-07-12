@@ -49,15 +49,15 @@ COPY docker/healthcheck.sh /healthcheck.sh
 RUN chmod +x /entrypoint.sh /healthcheck.sh
 
 # Data dirs owned by mcp user.
-RUN mkdir -p /var/lib/browser-mcp /run/browser-mcp /var/log/browser-mcp \
- && chown -R mcp:mcp /var/lib/browser-mcp /run/browser-mcp /var/log/browser-mcp /app
+RUN mkdir -p /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope \
+ && chown -R mcp:mcp /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope /app
 
 USER mcp
 
 ENV CHROME_BIN=/usr/bin/google-chrome \
-    BROWSER_MCP_DATA_DIR=/var/lib/browser-mcp \
-    BROWSER_MCP_SOCKET=/run/browser-mcp/daemon.sock \
-    BROWSER_MCP_LOG_DIR=/var/log/browser-mcp \
+    LEAN_CHRONOSCOPE_DATA_DIR=/var/lib/lean-chronoscope \
+    LEAN_CHRONOSCOPE_SOCKET=/run/lean-chronoscope/daemon.sock \
+    LEAN_CHRONOSCOPE_LOG_DIR=/var/log/lean-chronoscope \
     NODE_ENV=production
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

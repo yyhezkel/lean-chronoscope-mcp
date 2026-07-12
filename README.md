@@ -35,10 +35,10 @@ git clone https://github.com/yyhezkel/lean-chronoscope-mcp.git
 cd lean-chronoscope-mcp
 
 # Generate a bearer token for the HTTP bridge:
-echo "BROWSER_MCP_HTTP_TOKEN=$(openssl rand -base64 32)" > docker/.env
+echo "LEAN_CHRONOSCOPE_HTTP_TOKEN=$(openssl rand -base64 32)" > docker/.env
 
 docker compose -f docker/docker-compose.yml up -d --build
-docker exec browser-mcp ls /run/browser-mcp/daemon.sock   # should exist
+docker exec lean-chronoscope-mcp ls /run/lean-chronoscope/daemon.sock   # should exist
 curl -s http://127.0.0.1:8780/health                       # {"ok":true,...}
 ```
 
@@ -47,7 +47,7 @@ curl -s http://127.0.0.1:8780/health                       # {"ok":true,...}
 **Claude Code (HTTP transport — recommended):**
 ```bash
 claude mcp add lean-chronoscope -s user --transport http http://127.0.0.1:8780/mcp \
-  --header "Authorization: Bearer $(grep BROWSER_MCP_HTTP_TOKEN docker/.env | cut -d= -f2)"
+  --header "Authorization: Bearer $(grep LEAN_CHRONOSCOPE_HTTP_TOKEN docker/.env | cut -d= -f2)"
 ```
 Restart your client session — tool lists load at startup.
 
@@ -57,13 +57,13 @@ Restart your client session — tool lists load at startup.
   "mcpServers": {
     "lean-chronoscope": {
       "command": "docker",
-      "args": ["exec", "-i", "browser-mcp", "node", "/app/dist/bin/mcp.js", "--session", "default"]
+      "args": ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", "default"]
     }
   }
 }
 ```
 
-Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you choose). The Docker container is named `browser-mcp` by default — that's a local name only; rename it via `container_name:` in `docker/docker-compose.yml` if you prefer.
+Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you choose). The Docker container is named `lean-chronoscope-mcp` by default — that's a local name only; rename it via `container_name:` in `docker/docker-compose.yml` if you prefer.
 
 ## Tool surface (56 tools)
 
@@ -85,8 +85,8 @@ Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you
 | Mode | Flag / env | Tools advertised | `tools/list` payload |
 |---|---|---|---|
 | `full` *(default)* | — | 56 | ~5,258 tok |
-| `slim` | `--slim` / `BROWSER_MCP_SLIM=1` | 5 core | ~547 tok |
-| `gateway` | `--gateway` / `BROWSER_MCP_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`) — the 56 stay callable by name | ~321 tok |
+| `slim` | `--slim` / `LEAN_CHRONOSCOPE_SLIM=1` | 5 core | ~547 tok |
+| `gateway` | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`) — the 56 stay callable by name | ~321 tok |
 
 **Gateway mode** advertises a 3-tool index: the model reads `tools_catalog`, fetches `tool_schema` only for tools it needs, then calls them via `tools_invoke`. Useful for MCP clients that don't already defer tool schemas on the client side. *Note:* Claude Code already defers MCP schemas natively — gateway is mostly useful for other clients or extreme token budgets. See [`docs/COMPARISON.md`](docs/COMPARISON.md) for the full breakdown.
 
@@ -109,6 +109,38 @@ Tools appear in your client as `mcp__lean-chronoscope__*` (or whatever alias you
 The daemon owns the browser and writes the firehose to SQLite. Each MCP client connection spawns a thin per-session mcp-server that talks to the daemon over a Unix socket. Tools are queries on the store; listings return summaries, detail tools fetch bodies, big bodies become content-addressed blobs.
 
 See [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) for the deeper design rationale.
+
+## Session lifecycle & retention
+
+Sessions are tracked in a persistent cross-session index, `registry.sqlite`, at
+`<dataDir>/registry.sqlite` (a `sessions` table: id, created_at, last_activity,
+status open/closed, source stdio/http, page_count, size_bytes, closed_at,
+data_dir). It survives daemon restarts and is reconciled at boot (orphaned
+`open` rows flip to `closed`, on-disk session dirs are re-indexed). `session_list`
+reports `lastActivity`, `sizeBytes` (db+wal+shm+blobs), `status`, and `source`,
+and takes an optional `includeClosed` to also surface closed sessions from the
+registry; `daemon_status` reports the same accounting plus a `dbBytes`/`blobBytes`
+breakdown.
+
+A background **reaper** keeps things bounded automatically:
+
+- **Idle / size eviction** — frees the browser context + memory (leaving the
+  on-disk DB for the age sweep) for sessions idle past `LEAN_CHRONOSCOPE_IDLE_MS`
+  (default 30min) or over `LEAN_CHRONOSCOPE_SIZE_CAP_BYTES` (default 500MB,
+  `0` disables).
+- **Row pruning** — keeps the newest `LEAN_CHRONOSCOPE_MAX_CONSOLE` (50k) console
+  rows, `LEAN_CHRONOSCOPE_MAX_NETWORK` (50k) network rows, and
+  `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` (10) snapshots per page; FTS stays in
+  sync via triggers and freed pages are reclaimed with `incremental_vacuum`.
+- **Age sweep** — session dirs older than `LEAN_CHRONOSCOPE_RETENTION_DAYS`
+  (default 7) are removed ~hourly (not just at boot) and the registry stays in sync.
+
+Reaper cadence is `LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS` (default 60000, `0`
+disables the reaper). Sessions checkpoint (`wal_checkpoint(TRUNCATE)`) before
+closing so the persisted `db.sqlite` is complete and compact.
+
+> Env vars use the `LEAN_CHRONOSCOPE_*` prefix; the legacy `BROWSER_MCP_*` names
+> are still honored as a fallback for backward compatibility.
 
 ## vs Playwright MCP / Chrome DevTools MCP
 

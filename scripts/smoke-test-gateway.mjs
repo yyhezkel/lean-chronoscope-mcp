@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Gateway-mode smoke: BROWSER_MCP_GATEWAY=1 advertises 3 meta-tools instead of
+// Gateway-mode smoke: LEAN_CHRONOSCOPE_GATEWAY=1 advertises 3 meta-tools instead of
 // 56 (mount cost ~321 tok vs ~5,258). Verify catalog → schema → invoke works
 // end-to-end, and that the underlying 56 are reachable via tools_invoke.
 import { spawn } from "node:child_process";
@@ -10,7 +10,7 @@ const ok = (c, l) => { if (c) console.log(`  ✓ ${l}`); else { console.log(`  �
 
 const proc = spawn(
   "docker",
-  ["exec", "-i", "-e", "BROWSER_MCP_GATEWAY=1", "browser-mcp",
+  ["exec", "-i", "-e", "LEAN_CHRONOSCOPE_GATEWAY=1", "lean-chronoscope-mcp",
    "node", "/app/dist/bin/mcp.js", "--session", SESSION_ID],
   { stdio: ["pipe", "pipe", "inherit"] },
 );

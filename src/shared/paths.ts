@@ -1,13 +1,12 @@
 import path from "node:path";
+import { env } from "./env.js";
 
-export const DEFAULT_DATA_DIR =
-  process.env.BROWSER_MCP_DATA_DIR ?? "/var/lib/browser-mcp";
+export const DEFAULT_DATA_DIR = env("DATA_DIR") ?? "/var/lib/lean-chronoscope";
 
 export const DEFAULT_SOCKET_PATH =
-  process.env.BROWSER_MCP_SOCKET ?? "/run/browser-mcp/daemon.sock";
+  env("SOCKET") ?? "/run/lean-chronoscope/daemon.sock";
 
-export const DEFAULT_LOG_DIR =
-  process.env.BROWSER_MCP_LOG_DIR ?? "/var/log/browser-mcp";
+export const DEFAULT_LOG_DIR = env("LOG_DIR") ?? "/var/log/lean-chronoscope";
 
 export function getSessionDir(sessionId: string, dataDir = DEFAULT_DATA_DIR): string {
   return path.join(dataDir, "sessions", sessionId);

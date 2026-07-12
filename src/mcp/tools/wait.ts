@@ -71,7 +71,7 @@ const UploadFileInput = z.object({
 export const uploadFile = defineTool({
   name: "upload_file",
   description:
-    "Set the files on a file <input> identified by its snapshot UID. Paths are resolved inside the browser-mcp container.",
+    "Set the files on a file <input> identified by its snapshot UID. Paths are resolved inside the lean-chronoscope-mcp container.",
   category: "input",
   inputSchema: UploadFileInput,
   handler: async (input, ctx) => {

@@ -1,4 +1,5 @@
 import type { Database } from "better-sqlite3";
+import { env } from "@shared/env.js";
 import { BlobStore } from "./blobs.js";
 
 const INLINE_BODY_THRESHOLD = 10_000;
@@ -270,5 +271,61 @@ export class SessionWriter {
       stack: row.stack ?? null,
     });
     return Number(info.lastInsertRowid);
+  }
+
+  /**
+   * Bound in-session growth by count (the primary growth cap). Keeps the newest
+   * N console/network rows and the newest N snapshots PER page. The FTS mirrors
+   * stay consistent automatically via the AFTER DELETE triggers (migration 003)
+   * — never DELETE from console_fts/network_fts directly. Freed pages are handed
+   * back to the OS via incremental_vacuum (cheap, bounded, non-locking).
+   *
+   * Called only from the reaper tick (cold path), guarded by inFlight===0.
+   * Note: pruned network rows may leave orphaned blob files (res_body_blob);
+   * those are reclaimed wholesale when the age sweep drops the session dir.
+   */
+  prune(): void {
+    const maxConsole = Number(env("MAX_CONSOLE") ?? 50_000);
+    const maxNetwork = Number(env("MAX_NETWORK") ?? 50_000);
+    const maxSnapPerPage = Number(env("MAX_SNAPSHOTS_PER_PAGE") ?? 10);
+
+    const tx = this.db.transaction(() => {
+      if (maxConsole > 0) {
+        this.db
+          .prepare(
+            `DELETE FROM console_messages WHERE id NOT IN (
+               SELECT id FROM console_messages ORDER BY id DESC LIMIT ?)`,
+          )
+          .run(maxConsole);
+      }
+      if (maxNetwork > 0) {
+        this.db
+          .prepare(
+            `DELETE FROM network_requests WHERE id NOT IN (
+               SELECT id FROM network_requests ORDER BY id DESC LIMIT ?)`,
+          )
+          .run(maxNetwork);
+      }
+      if (maxSnapPerPage > 0) {
+        // Rank each page's snapshots newest-first; surplus = rank > N. Null out
+        // parent_id pointers into the surplus first so the self-FK never dangles,
+        // then delete the surplus.
+        const surplus = `SELECT id FROM (
+             SELECT id, ROW_NUMBER() OVER (PARTITION BY page_id ORDER BY id DESC) AS rn
+             FROM snapshots
+           ) WHERE rn > ?`;
+        this.db.prepare(`UPDATE snapshots SET parent_id = NULL WHERE parent_id IN (${surplus})`).run(
+          maxSnapPerPage,
+        );
+        this.db.prepare(`DELETE FROM snapshots WHERE id IN (${surplus})`).run(maxSnapPerPage);
+      }
+    });
+    tx();
+
+    try {
+      this.db.pragma("incremental_vacuum(1000)");
+    } catch {
+      /* no-op unless auto_vacuum=INCREMENTAL was enabled at create */
+    }
   }
 }

@@ -90,6 +90,8 @@ import type {
   PerformanceMetricsResult,
   SessionCloseParams,
   SessionCloseResult,
+  SessionListParams,
+  SessionListEntry,
   SessionListResult,
   NetworkWaitForParams,
   NetworkWaitForResult,
@@ -111,6 +113,7 @@ import { computeSnapshotDiff } from "./snapshot/diff.js";
 import { DaemonError } from "@shared/errors.js";
 import { getLogger } from "@shared/logger.js";
 import { SessionRegistry, type Session } from "./session-registry.js";
+import type { RegistryStore } from "./storage/registry.js";
 import type { Broadcaster } from "./live/broadcaster.js";
 import type { SubscriptionRegistry } from "./live/subscriptions.js";
 import { buildUri, parseUri } from "./live/uri.js";
@@ -127,7 +130,7 @@ export interface ConnectionContext {
 import fs from "node:fs";
 
 const log = getLogger("daemon/rpc");
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 function sizeOfFile(p: string): number {
   try {
@@ -153,15 +156,42 @@ export class RpcDispatcher {
     private readonly browser: Browser,
     private readonly broadcaster: Broadcaster,
     private readonly subscriptions: SubscriptionRegistry,
+    private readonly registry?: RegistryStore,
   ) {
-    this.sessions = new SessionRegistry(browser, broadcaster);
+    this.sessions = new SessionRegistry(browser, broadcaster, registry);
   }
 
   async closeAll(): Promise<void> {
     await this.sessions.closeAll();
   }
 
+  /** Run one lifecycle tick (size flush + prune + idle/size eviction). */
+  async reapTick(): Promise<void> {
+    await this.sessions.reapTick();
+  }
+
   async dispatch(method: DaemonMethod, params: unknown, ctx?: ConnectionContext): Promise<unknown> {
+    // Touch last-activity + hold an in-flight guard so the reaper never evicts a
+    // session mid-RPC. Two integer writes on a Map hit — no disk, no error
+    // swallowing (try/finally, not try/catch).
+    const sid = (params as { sessionId?: string } | undefined)?.sessionId;
+    const sess = sid ? this.sessions.sessions.get(sid) : undefined;
+    if (sess) {
+      sess.lastActivity = Date.now();
+      sess.inFlight++;
+    }
+    try {
+      return await this.dispatchInner(method, params, ctx);
+    } finally {
+      if (sess) sess.inFlight--;
+    }
+  }
+
+  private async dispatchInner(
+    method: DaemonMethod,
+    params: unknown,
+    ctx?: ConnectionContext,
+  ): Promise<unknown> {
     switch (method) {
       case "status":
         return this.status();
@@ -184,7 +214,7 @@ export class RpcDispatcher {
       case "page.reload":
         return this.pageHistory(params as PageHistoryParams, "reload");
       case "session.list":
-        return this.sessionList();
+        return this.sessionList(params as SessionListParams);
       case "session.close":
         return this.sessionClose(params as SessionCloseParams);
       case "wait.for":
@@ -319,7 +349,7 @@ export class RpcDispatcher {
 
   private async sessionEnsure(params: SessionEnsureParams): Promise<SessionEnsureResult> {
     if (!params?.sessionId) throw DaemonError.invalidParams("sessionId is required");
-    const { session, created } = await this.sessions.ensure(params.sessionId);
+    const { session, created } = await this.sessions.ensure(params.sessionId, params.source);
     return {
       sessionId: session.id,
       currentPageId: session.selectedPageId,
@@ -418,15 +448,34 @@ export class RpcDispatcher {
     };
   }
 
-  private sessionList(): SessionListResult {
-    return {
-      sessions: Array.from(this.sessions.sessions.values()).map((s) => ({
-        id: s.id,
-        createdAt: s.createdAt,
-        pageCount: s.pages.size,
-        selectedPageId: s.selectedPageId,
-      })),
-    };
+  private sessionList(params?: SessionListParams): SessionListResult {
+    const live: SessionListEntry[] = Array.from(this.sessions.sessions.values()).map((s) => ({
+      id: s.id,
+      createdAt: s.createdAt,
+      lastActivity: s.lastActivity,
+      pageCount: s.pages.size,
+      selectedPageId: s.selectedPageId,
+      sizeBytes: s.sizeBytes,
+      status: "open" as const,
+      source: s.source,
+    }));
+    if (!params?.includeClosed || !this.registry) return { sessions: live };
+    // Union with closed rows from the registry index for discovery.
+    const liveIds = new Set(live.map((s) => s.id));
+    const closed: SessionListEntry[] = this.registry
+      .list("closed")
+      .filter((r) => !liveIds.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        createdAt: r.createdAt,
+        lastActivity: r.lastActivity,
+        pageCount: r.pageCount,
+        selectedPageId: null,
+        sizeBytes: r.sizeBytes,
+        status: "closed" as const,
+        source: r.source,
+      }));
+    return { sessions: [...live, ...closed] };
   }
 
   private async sessionClose(params: SessionCloseParams): Promise<SessionCloseResult> {
@@ -1303,7 +1352,11 @@ export class RpcDispatcher {
   private daemonStatus(): DaemonStatusResult {
     const sessions = Array.from(this.sessions.sessions.values()).map((s) => {
       const counts = s.reader.tableCounts();
-      const dbBytes = sizeOfFile(s.db.dbPath);
+      // db + wal + shm — previously only db.sqlite was counted (bug).
+      const dbBytes =
+        sizeOfFile(s.db.dbPath) +
+        sizeOfFile(`${s.db.dbPath}-wal`) +
+        sizeOfFile(`${s.db.dbPath}-shm`);
       const blobBytes = s.blobs.totalBytes();
       return {
         id: s.id,
@@ -1315,8 +1368,11 @@ export class RpcDispatcher {
         snapshotRows: counts.snapshots,
         exceptionRows: counts.exceptions,
         interceptRules: s.intercept.list().length,
+        sizeBytes: dbBytes + blobBytes,
         dbBytes,
         blobBytes,
+        lastActivity: s.lastActivity,
+        source: s.source,
       };
     });
     return {
@@ -1327,7 +1383,6 @@ export class RpcDispatcher {
       browserConnected: this.browser.connected,
       sessions,
       subscriptions: this.subscriptions.totalCount(),
-      totalRevisions: sessions.reduce((a, _s) => a, 0),
     };
   }
 

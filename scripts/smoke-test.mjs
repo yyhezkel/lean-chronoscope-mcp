@@ -14,13 +14,13 @@ const proc = spawn(
   [
     "exec",
     "-i",
-    "browser-mcp",
+    "lean-chronoscope-mcp",
     "node",
     "/app/dist/bin/mcp.js",
     "--session",
     sessionId,
     "--daemon-socket",
-    "/run/browser-mcp/daemon.sock",
+    "/run/lean-chronoscope/daemon.sock",
   ],
   { stdio: ["pipe", "pipe", "inherit"] },
 );

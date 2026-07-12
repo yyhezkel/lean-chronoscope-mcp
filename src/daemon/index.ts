@@ -1,12 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_DATA_DIR, DEFAULT_SOCKET_PATH } from "@shared/paths.js";
+import { env, deprecatedEnvSeen } from "@shared/env.js";
 import { getLogger } from "@shared/logger.js";
 import { launchBrowser } from "./browser.js";
 import { RpcDispatcher } from "./rpc-handlers.js";
 import { startSocketServer } from "./socket-server.js";
 import { Broadcaster } from "./live/broadcaster.js";
 import { SubscriptionRegistry } from "./live/subscriptions.js";
+import { RegistryStore } from "./storage/registry.js";
 
 const log = getLogger("daemon/main");
 
@@ -20,8 +22,18 @@ export interface DaemonConfig {
 export async function runDaemon(config: DaemonConfig): Promise<void> {
   fs.mkdirSync(config.dataDir, { recursive: true });
   log.info({ config }, "starting daemon");
+  if (deprecatedEnvSeen.size > 0) {
+    log.warn(
+      { vars: [...deprecatedEnvSeen] },
+      "using deprecated BROWSER_MCP_* env vars — rename to LEAN_CHRONOSCOPE_*",
+    );
+  }
 
-  runRetentionSweep(config.dataDir);
+  // Persistent cross-session index. Open + reconcile BEFORE the age sweep so the
+  // sweep can drop matching registry rows.
+  const registry = new RegistryStore(config.dataDir);
+  reconcileRegistry(registry, config.dataDir);
+  runRetentionSweep(config.dataDir, registry);
 
   const browser = await launchBrowser({
     executablePath: config.chromeBin,
@@ -30,7 +42,32 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
 
   const broadcaster = new Broadcaster();
   const subscriptions = new SubscriptionRegistry(broadcaster);
-  const dispatcher = new RpcDispatcher(browser, broadcaster, subscriptions);
+  const dispatcher = new RpcDispatcher(browser, broadcaster, subscriptions, registry);
+
+  // Periodic lifecycle reaper: flush size stats, prune rows, evict idle/oversized
+  // sessions (memory/Chrome only — disk is left to the age sweep). Runs the age
+  // sweep itself every ~hour so a long-lived daemon reclaims disk without a
+  // restart. REAPER_INTERVAL_MS=0 disables the whole thing.
+  const reaperMs = Number(env("REAPER_INTERVAL_MS") ?? 60_000);
+  let reaper: NodeJS.Timeout | undefined;
+  let sweepTicks = 0;
+  const sweepEvery = Math.max(1, Math.round((60 * 60_000) / Math.max(reaperMs, 1)));
+  if (reaperMs > 0) {
+    reaper = setInterval(() => {
+      void (async () => {
+        try {
+          await dispatcher.reapTick();
+          if (++sweepTicks >= sweepEvery) {
+            sweepTicks = 0;
+            runRetentionSweep(config.dataDir, registry);
+          }
+        } catch (err) {
+          log.error({ err }, "reaper tick failed");
+        }
+      })();
+    }, reaperMs);
+    reaper.unref();
+  }
   const server = startSocketServer({
     socketPath: config.socketPath,
     dispatcher,
@@ -42,13 +79,15 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info({ signal }, "shutdown initiated");
+    if (reaper) clearInterval(reaper);
     server.close();
     try {
-      await dispatcher.closeAll();
+      await dispatcher.closeAll(); // checkpoints each session's WAL on close
       await browser.close();
     } catch (err) {
       log.error({ err }, "error during shutdown");
     }
+    registry.close();
     broadcaster.dispose();
     try {
       fs.unlinkSync(config.socketPath);
@@ -80,7 +119,8 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
   // Optional HTTP+SSE bridge — only when explicitly enabled via env. Imports
   // are dynamic so the daemon doesn't pay the SDK transport cost in the common
   // stdio-only case.
-  if (process.env.BROWSER_MCP_HTTP_TOKEN) {
+  const httpToken = env("HTTP_TOKEN");
+  if (httpToken) {
     try {
       const [{ startHttpBridge }, { DaemonClient }] = await Promise.all([
         import("../mcp/http-bridge.js"),
@@ -88,18 +128,18 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
       ]);
       const httpDaemon = new DaemonClient(config.socketPath);
       await httpDaemon.connect();
-      const port = Number(process.env.BROWSER_MCP_HTTP_PORT ?? 8780);
-      const host = process.env.BROWSER_MCP_HTTP_HOST ?? "127.0.0.1";
+      const port = Number(env("HTTP_PORT") ?? 8780);
+      const host = env("HTTP_HOST") ?? "127.0.0.1";
       const mode =
-        process.env.BROWSER_MCP_GATEWAY === "1"
+        env("GATEWAY") === "1"
           ? "gateway"
-          : process.env.BROWSER_MCP_SLIM === "1"
+          : env("SLIM") === "1"
             ? "slim"
             : "full";
       await startHttpBridge({
         host,
         port,
-        bearerToken: process.env.BROWSER_MCP_HTTP_TOKEN,
+        bearerToken: httpToken,
         daemon: httpDaemon,
         sessionId: () => `http-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         mode,
@@ -113,13 +153,13 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
 }
 
 /**
- * Drop any session directory whose mtime is older than `BROWSER_MCP_RETENTION_DAYS`
+ * Drop any session directory whose mtime is older than `LEAN_CHRONOSCOPE_RETENTION_DAYS`
  * (default 7). Best-effort; logs and moves on if a delete fails. Runs once at
  * daemon startup — we don't sweep continuously because sessions are typically
  * short-lived and adding more daemon background work isn't worth the complexity.
  */
-function runRetentionSweep(dataDir: string): void {
-  const days = parseFloat(process.env.BROWSER_MCP_RETENTION_DAYS ?? "7");
+function runRetentionSweep(dataDir: string, registry?: RegistryStore): void {
+  const days = parseFloat(env("RETENTION_DAYS") ?? "7");
   if (!Number.isFinite(days) || days <= 0) {
     log.info({ days }, "retention sweep disabled");
     return;
@@ -136,6 +176,7 @@ function runRetentionSweep(dataDir: string): void {
       if (!stat.isDirectory()) continue;
       if (stat.mtimeMs < cutoff) {
         fs.rmSync(dir, { recursive: true, force: true });
+        registry?.delete(name); // keep the index in sync with disk
         removed++;
       } else {
         kept++;
@@ -145,6 +186,45 @@ function runRetentionSweep(dataDir: string): void {
     }
   }
   log.info({ removed, kept, days }, "retention sweep complete");
+}
+
+/**
+ * Heal the registry against reality at boot. The in-memory map is empty here,
+ * so (1) any row still 'open' is an orphan from an unclean shutdown → mark it
+ * closed, and (2) index any on-disk session dir the registry doesn't know about
+ * yet (e.g. sessions created before the registry existed) as a closed entry.
+ * Cheap, boot-only; does NOT re-open any BrowserContext or session DB.
+ */
+function reconcileRegistry(registry: RegistryStore, dataDir: string): void {
+  registry.markAllClosed(Date.now());
+  const sessionsDir = path.join(dataDir, "sessions");
+  if (!fs.existsSync(sessionsDir)) return;
+  for (const name of fs.readdirSync(sessionsDir)) {
+    if (registry.has(name)) continue;
+    const dir = path.join(sessionsDir, name);
+    try {
+      const stat = fs.statSync(dir);
+      if (!stat.isDirectory()) continue;
+      const dbPath = path.join(dir, "db.sqlite");
+      let size = 0;
+      for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+        try {
+          size += fs.statSync(f).size;
+        } catch {
+          /* file may not exist */
+        }
+      }
+      registry.insertClosed({
+        id: name,
+        createdAt: stat.mtimeMs,
+        lastActivity: stat.mtimeMs,
+        sizeBytes: size, // db files only; blob dir not walked at boot
+        dataDir: dbPath,
+      });
+    } catch (err) {
+      log.warn({ err, dir }, "registry reconcile: stat failed");
+    }
+  }
 }
 
 export function parseDaemonArgs(argv: string[]): DaemonConfig {

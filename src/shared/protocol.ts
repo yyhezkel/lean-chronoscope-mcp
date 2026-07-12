@@ -109,9 +109,16 @@ export interface StatusResult {
   sessions: number;
 }
 
+/** Where a session was created from — recorded in the registry index. */
+export type SessionSource = "stdio" | "http";
+
+/** Lifecycle status in the registry index. */
+export type SessionStatus = "open" | "closed";
+
 export interface SessionEnsureParams {
   sessionId: string;
   title?: string;
+  source?: SessionSource;
 }
 export interface SessionEnsureResult {
   sessionId: string;
@@ -157,9 +164,23 @@ export interface PageHistoryResult {
   navigated: boolean;
 }
 
-export interface SessionListParams {}
+export interface SessionListParams {
+  /** Also include closed sessions from the registry index (default: live only). */
+  includeClosed?: boolean;
+}
+export interface SessionListEntry {
+  id: string;
+  createdAt: number;
+  lastActivity: number;
+  pageCount: number;
+  selectedPageId: string | null;
+  /** Total on-disk footprint: db + wal + shm + blobs. */
+  sizeBytes: number;
+  status: SessionStatus;
+  source: SessionSource | null;
+}
 export interface SessionListResult {
-  sessions: Array<{ id: string; createdAt: number; pageCount: number; selectedPageId: string | null }>;
+  sessions: SessionListEntry[];
 }
 export interface SessionCloseParams { sessionId: string; }
 export interface SessionCloseResult { sessionId: string; closed: boolean; }
@@ -678,11 +699,16 @@ export interface DaemonStatusResult {
     snapshotRows: number;
     exceptionRows: number;
     interceptRules: number;
+    /** Total on-disk footprint: db + wal + shm + blobs. */
+    sizeBytes: number;
+    /** Breakdown: SQLite files (db+wal+shm) only. */
     dbBytes: number;
+    /** Breakdown: content-addressed blob files only. */
     blobBytes: number;
+    lastActivity: number;
+    source: SessionSource | null;
   }>;
   subscriptions: number;
-  totalRevisions: number;
 }
 
 // --- FTS5 search (M5.4) ---
@@ -836,7 +862,7 @@ export const ErrorCode = {
   INVALID_PARAMS: -32602,
   INTERNAL_ERROR: -32603,
 
-  // browser-mcp custom (-32000 to -32099 reserved per JSON-RPC spec)
+  // lean-chronoscope-mcp custom (-32000 to -32099 reserved per JSON-RPC spec)
   BROWSER_DISCONNECTED: -32001,
   SESSION_NOT_FOUND: -32002,
   PAGE_NOT_FOUND: -32003,

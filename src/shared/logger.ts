@@ -2,6 +2,7 @@ import pino, { type Logger } from "pino";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_LOG_DIR } from "./paths.js";
+import { env } from "./env.js";
 
 // Logs MUST go to a file, never stdout — stdout is reserved for MCP framing.
 // stderr is used as fallback if the log dir isn't writable.
@@ -17,14 +18,14 @@ export function getLogger(component: string): Logger {
 
 function createBaseLogger(): Logger {
   const logDir = DEFAULT_LOG_DIR;
-  const logFile = path.join(logDir, "browser-mcp.log");
+  const logFile = path.join(logDir, "lean-chronoscope.log");
   try {
     fs.mkdirSync(logDir, { recursive: true });
     rotateIfLarge(logFile);
     const dest = pino.destination({ dest: logFile, sync: false, append: true });
     return pino(
       {
-        level: process.env.BROWSER_MCP_LOG_LEVEL ?? "info",
+        level: env("LOG_LEVEL") ?? "info",
         timestamp: pino.stdTimeFunctions.isoTime,
       },
       dest,
@@ -32,7 +33,7 @@ function createBaseLogger(): Logger {
   } catch {
     // Fallback to stderr — never stdout.
     return pino(
-      { level: process.env.BROWSER_MCP_LOG_LEVEL ?? "info" },
+      { level: env("LOG_LEVEL") ?? "info" },
       pino.destination(2),
     );
   }
@@ -46,8 +47,8 @@ function createBaseLogger(): Logger {
  * on startup is sufficient.
  */
 function rotateIfLarge(logFile: string): void {
-  const MAX_LOG_BYTES = Number(process.env.BROWSER_MCP_LOG_MAX_BYTES ?? 10 * 1024 * 1024);
-  const KEEP_LOGS = Number(process.env.BROWSER_MCP_LOG_KEEP ?? 5);
+  const MAX_LOG_BYTES = Number(env("LOG_MAX_BYTES") ?? 10 * 1024 * 1024);
+  const KEEP_LOGS = Number(env("LOG_KEEP") ?? 5);
   if (!Number.isFinite(MAX_LOG_BYTES) || MAX_LOG_BYTES <= 0) return;
   try {
     const stat = fs.statSync(logFile);
