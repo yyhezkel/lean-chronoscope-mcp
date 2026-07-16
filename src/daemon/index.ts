@@ -52,10 +52,47 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
   let reaper: NodeJS.Timeout | undefined;
   let sweepTicks = 0;
   const sweepEvery = Math.max(1, Math.round((60 * 60_000) / Math.max(reaperMs, 1)));
+
+  // Font-watch: Chrome only scans fonts at launch, so when font files change in
+  // the drop-in dir we restart ourselves — Docker's `restart: unless-stopped`
+  // revives the container and the entrypoint's fc-cache loads the new fonts.
+  // Restart fires only once the dir is STABLE across two consecutive ticks, so
+  // we never relaunch mid-copy with a half-written font file.
+  // FONT_WATCH=0 disables; piggybacks on the reaper (REAPER_INTERVAL_MS=0 also disables).
+  const fontsDir = env("FONTS_DIR") ?? "/home/mcp/.fonts";
+  const fontWatch = (env("FONT_WATCH") ?? "1") !== "0";
+  const scanFonts = (): string => {
+    try {
+      return fs
+        .readdirSync(fontsDir, { recursive: true })
+        .map((f) => {
+          const p = path.join(fontsDir, String(f));
+          const s = fs.statSync(p);
+          return s.isFile() ? `${f}:${s.size}:${s.mtimeMs}` : "";
+        })
+        .filter(Boolean)
+        .sort()
+        .join("|");
+    } catch {
+      return ""; // dir missing/unreadable — treat as empty, never crash the tick
+    }
+  };
+  const fontBaseline = fontWatch ? scanFonts() : "";
+  let fontPrev = fontBaseline;
+
   if (reaperMs > 0) {
     reaper = setInterval(() => {
       void (async () => {
         try {
+          if (fontWatch) {
+            const cur = scanFonts();
+            if (cur !== fontBaseline && cur === fontPrev) {
+              log.info({ fontsDir }, "font change detected & settled — restarting to load new fonts");
+              void shutdown("FONT_RELOAD");
+              return;
+            }
+            fontPrev = cur;
+          }
           await dispatcher.reapTick();
           if (++sweepTicks >= sweepEvery) {
             sweepTicks = 0;

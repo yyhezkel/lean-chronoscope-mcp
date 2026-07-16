@@ -16,6 +16,11 @@ services:
       - lean-chronoscope-data:/var/lib/lean-chronoscope
       - lean-chronoscope-run:/run/lean-chronoscope
       - lean-chronoscope-log:/var/log/lean-chronoscope
+      # Custom fonts (optional): drop .ttf/.otf/.woff2 files in a host dir and
+      # mount it here — the entrypoint runs fc-cache before Chrome starts, so
+      # they become regular system fonts (proper fallback, nothing breaks).
+      # The image already ships Noto (Hebrew/Arabic/CJK/emoji) out of the box.
+      # - /path/on/host/fonts:/home/mcp/.fonts:ro
     # Give in-flight sessions time to checkpoint their WAL + close cleanly on
     # `docker stop` before SIGKILL. Bump if you run many concurrent sessions.
     stop_grace_period: 30s

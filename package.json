@@ -1,6 +1,6 @@
 {
   "name": "lean-chronoscope-mcp",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "private": true,
   "description": "Token-efficient browser MCP server: headless Chrome in Docker that captures everything (console / network / IndexedDB / snapshots) and lets the model query on read.",
   "type": "module",

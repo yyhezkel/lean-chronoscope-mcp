@@ -38,7 +38,7 @@ const CATEGORIES = {
   "Storage: IndexedDB": ["indexeddb_list_databases", "indexeddb_query", "indexeddb_clear"],
   Intercept: ["intercept_add", "intercept_list", "intercept_remove"],
   Emulation: ["emulate_viewport", "emulate_useragent", "emulate_network", "emulate_geolocation"],
-  Performance: ["performance_metrics", "daemon_status"],
+  Performance: ["performance_metrics", "daemon_status", "fonts_list"],
   Script: ["script_evaluate"],
 };
 const ALL = Object.values(CATEGORIES).flat();
@@ -91,6 +91,14 @@ async function main() {
     assert(/^\d+\.\d+\.\d+$/.test(r.version), `version=${r.version}`);
     assert(r.browserConnected === true, "browser not connected");
     return `v${r.version}`;
+  });
+  await t("fonts_list", async () => {
+    const all = sc(await callTool("fonts_list", {}));
+    assert(all.count > 0 && Array.isArray(all.families), "no fonts installed");
+    // Hebrew coverage is the point of the noto install — must not be empty.
+    const he = sc(await callTool("fonts_list", { lang: "he" }));
+    assert(he.count > 0, "no Hebrew-capable fonts (tofu regression)");
+    return `${all.count} families, ${he.count} cover he`;
   });
   await t("session_list", async () => {
     const r = sc(await callTool("session_list", {}));

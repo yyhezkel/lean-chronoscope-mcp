@@ -61,7 +61,9 @@ export type DaemonMethod =
   | "emulate.viewport"
   | "emulate.useragent"
   | "emulate.network"
-  | "emulate.geolocation";
+  | "emulate.geolocation"
+  // Fonts — container font inventory (fc-list).
+  | "fonts.list";
 
 export type DaemonNotificationMethod =
   | "resource.updated"
@@ -828,6 +830,19 @@ export interface EmulateUserAgentParams extends EmulateBase {
 export interface EmulateUserAgentResult {
   pageId: string;
   userAgent: string;
+}
+
+// --- Fonts (container font inventory) ---
+
+export interface FontsListParams {
+  sessionId?: string;
+  /** BCP-47 language filter (e.g. "he", "ar", "zh") → `fc-list :lang=<lang>`. */
+  lang?: string;
+}
+export interface FontsListResult {
+  families: string[];
+  count: number;
+  lang?: string;
 }
 
 export interface EmulateNetworkParams extends EmulateBase {

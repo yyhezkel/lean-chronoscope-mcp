@@ -28,7 +28,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install Chrome + minimum deps for headless rendering.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg wget xdg-utils \
-    fonts-liberation libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+    fonts-liberation fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
+    fontconfig \
+    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     libgbm1 libpango-1.0-0 libcairo2 libasound2 libdrm2 libxshmfence1 \
  && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google.gpg \
@@ -48,9 +50,11 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/healthcheck.sh /healthcheck.sh
 RUN chmod +x /entrypoint.sh /healthcheck.sh
 
-# Data dirs owned by mcp user.
-RUN mkdir -p /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope \
- && chown -R mcp:mcp /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope /app
+# Data dirs owned by mcp user. /home/mcp/.fonts is the custom-font drop-in dir:
+# mount extra fonts there (see docker-compose.yml) — entrypoint runs fc-cache
+# before Chrome starts, so anything in it becomes a normal system font.
+RUN mkdir -p /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope /home/mcp/.fonts \
+ && chown -R mcp:mcp /var/lib/lean-chronoscope /run/lean-chronoscope /var/log/lean-chronoscope /home/mcp/.fonts /app
 
 USER mcp
 

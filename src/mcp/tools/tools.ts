@@ -38,6 +38,7 @@ import { emulateViewport, emulateUserAgent, emulateNetwork, emulateGeolocation }
 import { performanceMetrics } from "./performance.js";
 import { consoleSearch, networkSearch } from "./search.js";
 import { daemonStatus } from "./daemon.js";
+import { fontsList } from "./fonts.js";
 import { scriptEvaluate } from "./script.js";
 import { waitFor, networkWaitFor, uploadFile } from "./wait.js";
 import { gatewayTools } from "./gateway.js";
@@ -96,6 +97,7 @@ export const allTools: ToolDefinition<any>[] = [
   consoleSearch,
   networkSearch,
   daemonStatus,
+  fontsList,
   scriptEvaluate,
   waitFor,
   networkWaitFor,

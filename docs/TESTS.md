@@ -2,11 +2,11 @@
 
 All tests are end-to-end against a running `browser-mcp` Docker container (real daemon, real Chromium, real CDP). No mocks.
 
-**Per-tool coverage:** [`scripts/test-all-tools.mjs`](../scripts/test-all-tools.mjs) exercises **all 56 tools** over one shared session and prints a checkbox/PASS-FAIL matrix; the per-tool checklist lives in [`TOOL_TESTS.md`](TOOL_TESTS.md). The milestone smokes below remain as feature/regression tests.
+**Per-tool coverage:** [`scripts/test-all-tools.mjs`](../scripts/test-all-tools.mjs) exercises **all 58 tools** over one shared session and prints a checkbox/PASS-FAIL matrix; the per-tool checklist lives in [`TOOL_TESTS.md`](TOOL_TESTS.md). The milestone smokes below remain as feature/regression tests.
 
 | Test | Milestone | Asserts | Transport |
 |---|---|---|---|
-| `scripts/test-all-tools.mjs` | all | every one of the 56 tools, in dependency order, one session, session closed at end | stdio |
+| `scripts/test-all-tools.mjs` | all | every one of the 58 tools, in dependency order, one session, session closed at end | stdio |
 | `scripts/smoke-test-m1.mjs` | M1 | page_navigate + screenshot + console_list + network_list capture + bodies | stdio (host → `docker exec`) |
 | `scripts/smoke-test-m2.mjs` | M2 | `resources.list/read/subscribe/unsubscribe` + `resource.updated` notifications | daemon Unix socket (in-container) |
 | `scripts/smoke-test-m2-collectors.mjs` | M2 | console / network / snapshot / url emit live updates; 5× console collapses to 1 (debounce) | daemon Unix socket (in-container) |
@@ -19,7 +19,7 @@ All tests are end-to-end against a running `browser-mcp` Docker container (real 
 ## Run all
 
 ```bash
-node scripts/test-all-tools.mjs          # all 56 tools (one session)
+node scripts/test-all-tools.mjs          # all 58 tools (one session)
 docker cp scripts/smoke-test-m2.mjs browser-mcp:/tmp/m2.mjs
 docker cp scripts/smoke-test-m2-collectors.mjs browser-mcp:/tmp/m2c.mjs
 node scripts/smoke-test-m1.mjs

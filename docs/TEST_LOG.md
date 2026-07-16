@@ -4,6 +4,31 @@ Append-only. Newest run first. Format: `## <UTC timestamp> — <suite>` then per
 
 ---
 
+## 2026-07-16 — font-watch auto-reload (v1.6.0)
+
+New: daemon **font-watch** — the reaper rescans the custom-font dir (`LEAN_CHRONOSCOPE_FONTS_DIR`, default `/home/mcp/.fonts`) each tick; when the dir changes AND is stable across two consecutive ticks, the daemon exits cleanly (`FONT_RELOAD`) → `restart: unless-stopped` revives the container → entrypoint `fc-cache` loads the fonts before Chrome launches. No manual `docker restart` needed. `LEAN_CHRONOSCOPE_FONT_WATCH=0` (or reaper disabled) turns it off.
+
+- Live drop test: `docker cp DejaVuSans.ttf → /home/mcp/.fonts` at 15:11:34 → daemon logged "font change detected & settled" + `shutdown FONT_RELOAD` → container self-restarted at 15:13:23 (~109s = 2 ticks) → `fc-list` shows `DejaVu Sans` — **PASS**
+- 58-tool suite (`scripts/test-all-tools.mjs`) after the change — **58/58 PASS**
+- Half-copy guard: restart deferred until dir identical on two consecutive scans (never loads a partially-written font) — by design, covered by the 2-tick timing above
+
+Summary: **font-watch auto-reload + 58/58 tools PASS**
+
+---
+
+## 2026-07-16 — multi-script fonts + fonts_list (v1.5.0)
+
+New: baked Noto fonts into the runtime image (`fonts-noto-core` Hebrew/Arabic/etc., `fonts-noto-cjk`, `fonts-noto-color-emoji`, `fontconfig`) — non-Latin text no longer renders as tofu (□□□); custom-font drop-in dir `/home/mcp/.fonts` (compose mount example) with `fc-cache -f` in the entrypoint before Chrome launches; new read-only `fonts_list` tool (wraps `fc-list`, optional `lang` filter).
+
+Rebuilt `lean-chronoscope-mcp:local`; container healthy; `fc-list :lang=he` in-container shows Noto Sans/Serif/Rashi Hebrew.
+
+- 58-tool suite (`scripts/test-all-tools.mjs`) — **58/58 PASS** (incl. new `fonts_list`: 227 families installed, 3 cover `lang=he`)
+- Visual verification: screenshot of a data: page with Hebrew (שלום עולם), Arabic (مرحبا), Chinese (你好), Japanese (こんにちは), color emoji — all render as real glyphs (RTL correct, Arabic shaping correct), zero tofu — **PASS**
+
+Summary: **58/58 tools + multi-script rendering PASS**
+
+---
+
 ## 2026-07-12T18:35Z — blob-GC + session_attach + HTTP persistence (v1.4.0)
 
 New: dedup-safe blob-GC on prune; `session_attach` tool (by id/title, rehydrate, attach-or-create); `x-lc-session` header for HTTP session persistence; `assertSafeSessionId` path-traversal guard; `session.resolve` RPC; `title` on registry + `session_list`.

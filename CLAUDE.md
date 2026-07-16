@@ -8,7 +8,7 @@ Token-efficient browser MCP server: a long-running headless Chrome in Docker, sh
 
 Architecture: split between a **daemon** (owns Chrome + SQLite) and a per-Claude-session **mcp-server** (stdio), talking over a Unix socket with NDJSON JSON-RPC. Capture-everything firehose into per-session SQLite at `/var/lib/lean-chronoscope/sessions/<id>/db.sqlite`; tools are queries on top.
 
-Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current state: **v1.4.0 — M0–M6 + full tool surface + session lifecycle/retention + session reuse**, 57 tools (session/page lifecycle incl. `session_attach`, input incl. upload_file, snapshot+diff, screenshot, console+search, network+search+wait, intercept, storage, script_evaluate, emulation, waits, daemon_status). Session management: a persistent cross-session `registry.sqlite` (survives daemon restarts, reconciled at boot; sessions can carry an optional `title`), correct size accounting on `session_list`/`daemon_status` (db+wal+shm+blobs, with `dbBytes`/`blobBytes` breakdown; `session_list` takes `includeClosed` and returns `title`), and a background **reaper** that evicts idle/oversized sessions, prunes console/network/snapshot rows (now also GC-ing orphaned blob files), and runs the age-retention sweep hourly. Sessions can be re-attached across connections by id or title (`session_attach`), rehydrating a closed session's captured history from disk. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
+Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current state: **v1.6.0 — M0–M6 + full tool surface + session lifecycle/retention + session reuse + multi-script fonts + font-watch auto-reload**, 58 tools (session/page lifecycle incl. `session_attach`, input incl. upload_file, snapshot+diff, screenshot, console+search, network+search+wait, intercept, storage, script_evaluate, emulation, waits, daemon_status, fonts_list). Session management: a persistent cross-session `registry.sqlite` (survives daemon restarts, reconciled at boot; sessions can carry an optional `title`), correct size accounting on `session_list`/`daemon_status` (db+wal+shm+blobs, with `dbBytes`/`blobBytes` breakdown; `session_list` takes `includeClosed` and returns `title`), and a background **reaper** that evicts idle/oversized sessions, prunes console/network/snapshot rows (now also GC-ing orphaned blob files), and runs the age-retention sweep hourly. Sessions can be re-attached across connections by id or title (`session_attach`), rehydrating a closed session's captured history from disk. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Run / dev
 
@@ -66,7 +66,7 @@ The bearer token lives in
 |---|---|---|---|
 | full (default) | — | 57 | ~5,350 tok |
 | slim | `--slim` / `LEAN_CHRONOSCOPE_SLIM=1` | 5 core | ~547 tok |
-| gateway | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`); the 57 stay callable by name | ~321 tok |
+| gateway | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`); the 58 stay callable by name | ~321 tok |
 
 Gateway mode advertises a 3-tool index — the model reads `tools_catalog`, fetches
 `tool_schema` only for tools it needs, then dispatches via `tools_invoke`. Reproduces
@@ -75,6 +75,31 @@ already defers MCP tool schemas natively (only tool *names* enter context at mou
 full schemas load on demand via `ToolSearch`), so gateway is redundant there and
 slightly worse (loses native function-calling + arg validation). Use it for
 non-deferring clients or extreme token budgets. See [`docs/COMPARISON.md`](docs/COMPARISON.md).
+
+## Fonts (multi-script rendering)
+
+Headless Chrome renders with the **container's** fonts — the host OS/locale is
+irrelevant. The image bakes in `fonts-noto-core` (Hebrew, Arabic, Cyrillic, …),
+`fonts-noto-cjk` (Chinese/Japanese/Korean), `fonts-noto-color-emoji`, and
+`fontconfig`, so non-Latin text renders out of the box instead of tofu (□□□).
+
+- **Custom fonts without rebuilding:** mount `.ttf`/`.otf`/`.woff2` files into
+  `/home/mcp/.fonts` (commented example in `docker-compose.yml`). The daemon
+  **font-watch** (piggybacked on the reaper) detects changes in that dir and
+  auto-restarts itself once the dir is stable across two ticks (~2 min worst
+  case) — Docker's `restart: unless-stopped` revives the container and the
+  entrypoint's `fc-cache -f` loads the fonts before Chrome launches. Note: the
+  auto-restart kills active sessions' browser state (captured history survives
+  in SQLite). `docker restart` forces it immediately;
+  `LEAN_CHRONOSCOPE_FONT_WATCH=0` (or a disabled reaper) turns font-watch off.
+  Chrome builds its font list at startup; fonts added while it's running are
+  never picked up without that relaunch.
+- **`fonts_list` tool** (read-only, wraps `fc-list`): lists installed families;
+  `{lang: "he"}` filters to families covering a language — an empty result means
+  that script will render as tofu. Lets the model check coverage before
+  screenshotting and tell the operator what to mount.
+- Web fonts (`@font-face`) served by a site render regardless of container
+  fonts, but only cover what the site ships — they're not a substitute.
 
 ## Session lifecycle & retention
 
@@ -116,6 +141,8 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_MAX_CONSOLE` | `50000` | keep newest N console rows per session |
 | `LEAN_CHRONOSCOPE_MAX_NETWORK` | `50000` | keep newest N network rows per session |
 | `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` | `10` | keep newest N snapshots per page |
+| `LEAN_CHRONOSCOPE_FONT_WATCH` | `1` | auto-restart daemon when fonts change in `FONTS_DIR`; `0` disables |
+| `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
 | `LEAN_CHRONOSCOPE_DATA_DIR` | `/var/lib/lean-chronoscope` | data root (sessions + `registry.sqlite`) |
 
@@ -123,7 +150,7 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 
 All e2e (real daemon, real Chromium, real CDP — no mocks).
 
-- **Every tool (57):** `node scripts/test-all-tools.mjs` — one shared session, checkbox/PASS-FAIL matrix, closes its session at the end. Per-tool checklist: [`docs/TOOL_TESTS.md`](docs/TOOL_TESTS.md). Simple tools are tested inline in the runner; tools needing setup live in `scripts/tools/*.mjs` with a shared `harness.mjs` + seed `fixture.mjs`.
+- **Every tool (58):** `node scripts/test-all-tools.mjs` — one shared session, checkbox/PASS-FAIL matrix, closes its session at the end. Per-tool checklist: [`docs/TOOL_TESTS.md`](docs/TOOL_TESTS.md). Simple tools are tested inline in the runner; tools needing setup live in `scripts/tools/*.mjs` with a shared `harness.mjs` + seed `fixture.mjs`.
 - **What each test covers:** [`docs/TESTS.md`](docs/TESTS.md)
 - **Pass/fail history with timestamps:** [`docs/TEST_LOG.md`](docs/TEST_LOG.md)
 - **Scripts:** `scripts/test-all-tools.mjs`, `scripts/smoke-test-*.mjs`

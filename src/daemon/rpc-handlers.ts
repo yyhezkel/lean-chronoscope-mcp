@@ -33,6 +33,8 @@ import type {
   EmulateUserAgentResult,
   EmulateViewportParams,
   EmulateViewportResult,
+  FontsListParams,
+  FontsListResult,
   StorageClearParams,
   StorageClearResult,
   StorageGetParams,
@@ -130,6 +132,10 @@ export interface ConnectionContext {
 }
 
 import fs from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const log = getLogger("daemon/rpc");
 const VERSION = "1.4.0";
@@ -321,6 +327,8 @@ export class RpcDispatcher {
         return this.emulateNetwork(params as EmulateNetworkParams);
       case "emulate.geolocation":
         return this.emulateGeolocation(params as EmulateGeolocationParams);
+      case "fonts.list":
+        return this.fontsList(params as FontsListParams);
       default:
         throw DaemonError.methodNotFound(method);
     }
@@ -1544,6 +1552,36 @@ export class RpcDispatcher {
       try { await client.detach(); } catch { /* ignore */ }
     }
     return { pageId: sp.pageId, cleared };
+  }
+
+  // --- Fonts (container font inventory) ---
+
+  private async fontsList(p: FontsListParams): Promise<FontsListResult> {
+    const lang = p?.lang?.trim().toLowerCase();
+    // lang lands in an fc-list pattern arg — keep it a plain BCP-47 tag.
+    if (lang && !/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/.test(lang)) {
+      throw DaemonError.invalidParams("lang must be a BCP-47 tag like 'he', 'ar', 'zh-cn'");
+    }
+    const pattern = lang ? `:lang=${lang}` : ":";
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync("fc-list", [pattern, "family"], { timeout: 10_000 }));
+    } catch (err) {
+      throw DaemonError.invalidParams(
+        `fc-list failed (is fontconfig installed in the container?): ${(err as Error).message}`,
+      );
+    }
+    // Each line is a comma-joined list of (localized) family names.
+    const families = [
+      ...new Set(
+        stdout
+          .split("\n")
+          .flatMap((line) => line.split(","))
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    ].sort((a, b) => a.localeCompare(b));
+    return { families, count: families.length, lang: lang || undefined };
   }
 
   // --- Interception (M3.4) ---
