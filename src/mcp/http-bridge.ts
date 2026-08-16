@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { getLogger } from "@shared/logger.js";
+import { VERSION } from "@shared/version.js";
 import type { DaemonClient } from "./daemon-client.js";
 import type { ToolContext } from "./tools/ToolDefinition.js";
 import { allTools, getTool, selectTools, type ToolMode } from "./tools/tools.js";
@@ -128,7 +129,7 @@ async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMo
   // One mutable context per connection — `session_attach` reassigns conn.sessionId.
   const conn: ToolContext = { sessionId, daemon };
   const server = new Server(
-    { name: "lean-chronoscope-mcp", version: "1.4.0" },
+    { name: "lean-chronoscope-mcp", version: VERSION },
     { capabilities: { tools: {}, resources: { subscribe: true, listChanged: true } } },
   );
   registerResourceHandlers({ server, daemon, sessionId, allTools });

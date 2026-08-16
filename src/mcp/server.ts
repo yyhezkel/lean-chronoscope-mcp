@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getLogger } from "@shared/logger.js";
+import { VERSION } from "@shared/version.js";
 import type { DaemonClient } from "./daemon-client.js";
 import type { ToolContext } from "./tools/ToolDefinition.js";
 import { McpResponse } from "./response/McpResponse.js";
@@ -28,7 +29,7 @@ export async function startMcpServer(opts: McpServerOptions): Promise<void> {
   const server = new Server(
     {
       name: opts.serverName ?? "lean-chronoscope-mcp",
-      version: opts.serverVersion ?? "1.4.0",
+      version: opts.serverVersion ?? VERSION,
     },
     {
       capabilities: {

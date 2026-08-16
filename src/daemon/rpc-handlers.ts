@@ -115,6 +115,7 @@ import type { PageState } from "./session-registry.js";
 import { formatSnapshot } from "./snapshot/formatter.js";
 import { computeSnapshotDiff } from "./snapshot/diff.js";
 import { DaemonError } from "@shared/errors.js";
+import { VERSION } from "@shared/version.js";
 import { getLogger } from "@shared/logger.js";
 import { SessionRegistry, type Session } from "./session-registry.js";
 import type { RegistryStore } from "./storage/registry.js";
@@ -138,7 +139,6 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const log = getLogger("daemon/rpc");
-const VERSION = "1.4.0";
 
 function sizeOfFile(p: string): number {
   try {
