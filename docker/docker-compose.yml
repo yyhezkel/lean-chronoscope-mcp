@@ -8,6 +8,10 @@ services:
     restart: unless-stopped
     init: true
     shm_size: "2gb"
+    # Chrome is the repeat host-OOM offender (10.7G/5.2G/4.6G kills, journal 2026-07/08). Cap it so the cgroup dies, not the host.
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 2048
     # HTTP+SSE bridge published to host loopback only. The agent runtime loads
     # HTTP MCP servers (not stdio), so this is how Claude attaches.
     ports:
