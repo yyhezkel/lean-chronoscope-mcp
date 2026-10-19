@@ -102,7 +102,25 @@ describe("redactUrl", () => {
       "https://h.example.com/p;secret=[REDACTED]/more?q=1",
     );
     expect(redactUrl("https://h.example.com/p;jsessionid=1;session=ABC?q=1", EXTERNAL)).toBe(
-      "https://h.example.com/p;jsessionid=1;session=[REDACTED]?q=1",
+      "https://h.example.com/p;jsessionid=[REDACTED];session=[REDACTED]?q=1",
+    );
+  });
+
+  it("masks Java/PHP session ids and bare sid (exact names only)", () => {
+    expect(redactUrl("https://h.example.com/p;jsessionid=ABC?x=1", EXTERNAL)).toBe(
+      "https://h.example.com/p;jsessionid=[REDACTED]?x=1",
+    );
+    expect(redactUrl("https://h.example.com/p;JSESSIONID=ABC/more", EXTERNAL)).toBe(
+      "https://h.example.com/p;JSESSIONID=[REDACTED]/more",
+    );
+    expect(redactUrl("https://h.example.com/p?jsessionid=ABC&x=1", EXTERNAL)).toBe(
+      "https://h.example.com/p?jsessionid=[REDACTED]&x=1",
+    );
+    expect(redactUrl("https://h.example.com/p?PHPSESSID=x&y=1", EXTERNAL)).toBe(
+      "https://h.example.com/p?PHPSESSID=[REDACTED]&y=1",
+    );
+    expect(redactUrl("https://h.example.com/p?sid=s3cr3t&foosid=keep&sidebar=1", EXTERNAL)).toBe(
+      "https://h.example.com/p?sid=[REDACTED]&foosid=keep&sidebar=1",
     );
   });
 

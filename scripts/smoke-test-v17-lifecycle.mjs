@@ -6,7 +6,9 @@
 //   LC_CONTAINER=lc-test-d OP_TIMEOUT_MS=8000 node scripts/smoke-test-v17-lifecycle.mjs
 // (e) concurrent creates of a brand-new session id (raw daemon socket, since the
 // stdio MCP ensures its session at startup); (f) locked-op timeout + unlocked
-// page_close. OP_TIMEOUT_MS must match the container's LOCKED_OP_TIMEOUT_MS
+// page_close; (g) a page whose evaluate was abandoned by the op timeout stays
+// guarded from the page reaper until the op settles (page_close), which logs an
+// "abandoned op settled" line. OP_TIMEOUT_MS must match the container's LOCKED_OP_TIMEOUT_MS
 // (default 60000 — works, just slow).
 import { execFileSync } from "node:child_process";
 import { spawnMcp, sleep, CONTAINER } from "./tools/harness.mjs";
@@ -190,6 +192,45 @@ async function main() {
       ok(c === true && closeMs < 5000, "(f) page_close succeeds while evaluate hangs", `${closeMs}ms ${c === true ? "" : c}`);
       const h = await hung;
       ok(h.at < 5000, "(f) hung evaluate released by page_close", `${h.at}ms`);
+      await m.call("session_close").catch(() => {});
+    } finally {
+      await m.close();
+    }
+  }
+
+  // (g) the timeout releases the LOCK but not the in-flight guard: a
+  // NON-selected page with an abandoned, still-pending evaluate must not be
+  // reaped even after it is idle past PAGE_IDLE_MS (c) shows the same page
+  // shape IS reaped once idle). page_close then settles the op, which logs.
+  {
+    const m = await open(`v17-g-${stamp}`);
+    try {
+      const keep = m.sc(await m.call("page_new", { url: html("keep") })).pageId;
+      const hungPage = m.sc(await m.call("page_new", { url: html("hung"), background: true })).pageId;
+      await m.call("page_select", { pageId: keep });
+      const t0 = Date.now();
+      const r = await m.callTool("script_evaluate", {
+        pageId: hungPage, expression: "new Promise(() => {})", awaitPromise: true,
+      }).catch((e) => ({ isError: true, content: [{ type: "text", text: e.message }] }));
+      ok(r.isError && /within|timeout|timed out/i.test(m.txt(r)), "(g) evaluate on background page times out",
+        `${Date.now() - t0}ms`);
+      // Idle well past PAGE_IDLE_MS + reaper ticks, measured from the eval's
+      // start (its last activity), while keeping the selected page busy.
+      const end = t0 + PAGE_IDLE_MS + TICK_MS * 3;
+      while (Date.now() < end) {
+        await m.call("script_evaluate", { expression: "1+1" });
+        await sleep(700);
+      }
+      const ids = (await m.pages()).map((p) => p.pageId);
+      ok(ids.includes(hungPage), "(g) page with pending abandoned op NOT reaped",
+        `idle ${Date.now() - t0}ms, pages=${ids.join(",")}`);
+      const c = await m.call("page_close", { pageId: hungPage }).then(() => true, (e) => e.message);
+      ok(c === true, "(g) page_close of the hung page succeeds", c === true ? "" : c);
+      await sleep(500);
+      const logs = execFileSync("docker", ["exec", CONTAINER, "sh", "-c",
+        'cat "${LEAN_CHRONOSCOPE_LOG_DIR:-/var/log/lean-chronoscope}"/*.log'], { encoding: "utf8" });
+      const line = logs.split("\n").find((l) => l.includes("abandoned op settled") && l.includes(`"pageId":"${hungPage}"`));
+      ok(!!line, '(g) "abandoned op settled" logged after page_close', line ? line.slice(0, 220) : "no line");
       await m.call("session_close").catch(() => {});
     } finally {
       await m.close();
