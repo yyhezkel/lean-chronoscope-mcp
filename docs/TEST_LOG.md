@@ -325,3 +325,18 @@ Container: `LC_CONTAINER=lc-s1 LC_TEST_PORT=18821 scripts/test-container.sh -e L
   - a back-to-back rerun within 60s fails its first 401 checks with 429 (IP still locked out by the previous run's flood — expected); rerun after 75s PASS
   - daemon log: exactly one "closing idle HTTP MCP session" per run (no live session closed)
 - test-all-tools (`LC_CONTAINER=lc-s1`) ......................... 58/58 PASS
+
+---
+
+## 2026-10-19 — v1.7.0 final integration (after 2 review rounds, test container)
+
+- vitest (redaction) ............................................ 26/26 PASS
+- test-all-tools ................................................ 58/58 PASS
+- smoke-test-v17-lifecycle (short timers, op timeout 8s) ........ ALL PASS
+- smoke-test-v17-screencast (+ watched-page reaper check) ....... PASS
+- smoke-test-v17-relaunch (pkill -9 chrome) ..................... ALL PASS
+- smoke-test-m2-mcp ............................................. PASS
+- smoke-test-http-bridge ........................................ PASS
+- real Claude Code 2.1.303 over HTTP, HTTP_IDLE_MS=8s: live client (open SSE)
+  not swept across a 30s pause; `claude -p` exit without DELETE → swept ~10s later
+- `docker stop` → exit 0 in 1s
