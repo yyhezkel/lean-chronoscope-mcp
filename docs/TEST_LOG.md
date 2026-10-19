@@ -313,3 +313,15 @@ Container: `LC_CONTAINER=lc-s2 LC_TEST_PORT=18822 scripts/test-container.sh -e L
 - env typo `LOCKED_OP_TIMEOUT_MS=6O0` → `invalid numeric env — using default` (using 60000) logged; navigate OK
 - default container: test-all-tools .............................. 58/58 PASS
 - default container: smoke-test-v17-relaunch ..................... ALL PASS
+## 2026-10-19 — review2/S1-bridge (idle sweep for dead HTTP clients, 404 on unknown sid, 429 on known-sid bad token)
+
+Container: `LC_CONTAINER=lc-s1 LC_TEST_PORT=18821 scripts/test-container.sh -e LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN=60 -e LEAN_CHRONOSCOPE_HTTP_IDLE_MS=8000`
+
+- pnpm typecheck && pnpm build .................................. PASS
+- smoke-test-http-bridge (`LC_IDLE_MS=8000 LC_CONTAINER=lc-s1 LC_HTTP_URL=http://127.0.0.1:18821`) ... PASS (36 checks, run twice on a fresh container)
+  - (i) client subscribed to a screencast stays alive 15s with only its SSE stream open; drops SSE + agent sockets without DELETE → /health sessions 1 → 0 after 8.6–9.7s, daemon logs "screencast stopped"
+  - (j) stale sid POST → 404 `{"code":-32001,"message":"Session not found"}`, stale sid GET → 404; fresh initialize → tools/list 58
+  - (k) known sid + bad token burst of 70 → 10–35×429 (rest 401); anonymous bad-token burst → 70×429
+  - a back-to-back rerun within 60s fails its first 401 checks with 429 (IP still locked out by the previous run's flood — expected); rerun after 75s PASS
+  - daemon log: exactly one "closing idle HTTP MCP session" per run (no live session closed)
+- test-all-tools (`LC_CONTAINER=lc-s1`) ......................... 58/58 PASS

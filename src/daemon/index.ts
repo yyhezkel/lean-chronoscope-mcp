@@ -260,6 +260,7 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
         sessionRatePerMin: envLimit("HTTP_SESSION_RATE_PER_MIN", 600),
         initRatePerMin: envLimit("HTTP_INIT_RATE_PER_MIN", 120),
         maxSessions: envLimit("HTTP_MAX_SESSIONS", 64),
+        idleMs: envLimit("HTTP_IDLE_MS", 30 * 60 * 1000),
         tls: tlsCert && tlsKey ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) } : undefined,
       });
     } catch (err) {

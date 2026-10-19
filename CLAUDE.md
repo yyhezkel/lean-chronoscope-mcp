@@ -49,7 +49,13 @@ socket connection** (opened at initialize, closed with the transport — or righ
 away if the first request never initializes): daemon-side resource subscriptions
 are keyed per connection, so one client's unsubscribe can't end another's stream,
 and a disconnect releases its subscriptions (stopping a CDP screencast nobody else
-watches).
+watches). A client that dies without DELETE never fires `onclose` (the SDK has no
+idle timeout, and a watched page is exempt from the daemon's idle eviction), so an
+**idle sweep** closes transports with no request open (an open GET SSE stream
+counts as alive; TCP keepalive detects half-open SSE sockets) and none started for
+`HTTP_IDLE_MS` (default 30 min) via the same `onclose` path. A stale/unknown
+`mcp-session-id` gets the spec'd **404** (`-32001 Session not found`) so the client
+re-initializes; an `initialize` carrying a stale header is still accepted.
 
 **Session persistence on reconnect:** the bridge honors a client-supplied
 `x-lc-session: <id>` request header — reconnecting with the same header returns
@@ -216,10 +222,11 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
 | `LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | HTTP bridge POST body cap; larger → 413 |
-| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `60` | failed-auth attempts per client IP (token bucket, burst = rate) → 429 + `Retry-After`; once exhausted, requests without a live `mcp-session-id` are refused before the token compare; `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `60` | failed-auth attempts per client IP (token bucket, burst = rate) → 429 + `Retry-After`; once exhausted, requests without a live `mcp-session-id` are refused before the token compare, and a bad token on a live sid gets 429 instead of 401; `0` disables |
 | `LEAN_CHRONOSCOPE_HTTP_SESSION_RATE_PER_MIN` | `600` | authenticated requests per MCP session (`mcp-session-id`) → 429; DELETE exempt; `0` disables |
 | `LEAN_CHRONOSCOPE_HTTP_INIT_RATE_PER_MIN` | `120` | authenticated requests with no live session (initialize) per client IP → 429; `0` disables |
 | `LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS` | `64` | max concurrent HTTP MCP transports; new sessions beyond → 503; `0` = unlimited |
+| `LEAN_CHRONOSCOPE_HTTP_IDLE_MS` | `1800000` (30min) | close HTTP MCP sessions with no open request (incl. SSE stream) for this long — releases daemon connection/subscriptions/screencast; client gets 404 and re-inits; `0` disables |
 | `LEAN_CHRONOSCOPE_HTTP_TLS_CERT` / `_TLS_KEY` | (unset) | PEM file paths; both set → bridge serves HTTPS; only one set → bridge refuses to start (fail closed) |
 | `LEAN_CHRONOSCOPE_DATA_DIR` | `/var/lib/lean-chronoscope` | data root (sessions + `registry.sqlite`) |
 

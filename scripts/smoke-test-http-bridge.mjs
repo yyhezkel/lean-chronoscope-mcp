@@ -8,6 +8,10 @@
 //   clients pinned to one daemon session (x-lc-session) subscribe to the same
 //   screencast URI; A unsubscribes → B still gets updates; B disconnects
 //   (DELETE) without unsubscribing → daemon logs "screencast stopped".
+//   Idle sweep: a client subscribed to a screencast drops its sockets without
+//   DELETE → its session is closed after the idle timeout ("screencast stopped",
+//   /health count drops); its stale mcp-session-id then gets 404 and a fresh
+//   initialize works. Bad token on a known session id is throttled too (429).
 // TLS mode (URL starts with https://): same checks with rejectUnauthorized:false,
 // plus "plain http:// to the same port fails".
 //
@@ -17,7 +21,8 @@
 // LC_MAX_SESSIONS (bridge's HTTP_MAX_SESSIONS; when set, fills the cap and
 // expects 503 on the next initialize), LC_SESSION_RATE_PER_MIN (bridge's
 // HTTP_SESSION_RATE_PER_MIN, default 600; 0 skips), LC_CONTAINER (when set,
-// the screencast check also greps the daemon log via `docker exec`).
+// the screencast check also greps the daemon log via `docker exec`),
+// LC_IDLE_MS (bridge's HTTP_IDLE_MS; idle-sweep check skipped when unset/0).
 import http from "node:http";
 import https from "node:https";
 import { execFileSync } from "node:child_process";
@@ -29,17 +34,18 @@ const RATE = Number(process.env.LC_RATE_PER_MIN ?? 60);
 const MAX_SESSIONS = Number(process.env.LC_MAX_SESSIONS ?? 0);
 const SESSION_RATE = Number(process.env.LC_SESSION_RATE_PER_MIN ?? 600);
 const CONTAINER = process.env.LC_CONTAINER;
+const IDLE_MS = Number(process.env.LC_IDLE_MS ?? 0);
 const TLS = BASE.startsWith("https:");
 
 const ok = (c, l) => { if (c) console.log(`  ✓ ${l}`); else { console.log(`  ✗ ${l}`); process.exitCode = 1; } };
 
 /** Minimal request helper. `body` may be a string/Buffer, or {chunks:[...]} for chunked upload. */
-function request(url, { method = "GET", headers = {}, body } = {}) {
+function request(url, { method = "GET", headers = {}, body, agent } = {}) {
   const u = new URL(url);
   const mod = u.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
     let early; // response seen before a write error (server rejected mid-upload)
-    const req = mod.request(u, { method, headers, rejectUnauthorized: false }, (res) => {
+    const req = mod.request(u, { method, headers, agent, rejectUnauthorized: false }, (res) => {
       early = { status: res.statusCode, headers: res.headers, text: "" };
       const parts = [];
       res.on("data", (c) => parts.push(c));
@@ -94,24 +100,24 @@ async function waitFor(pred, timeoutMs) {
  * opens that stream and collects them.
  */
 class McpHttpClient {
-  constructor(extraHeaders = {}) { this.extra = extraHeaders; this.nextId = 1; this.notifs = []; }
+  constructor(extraHeaders = {}, agent = undefined) { this.extra = extraHeaders; this.agent = agent; this.nextId = 1; this.notifs = []; }
   headers() {
     return { ...mcpHeaders, ...this.extra, ...(this.sid ? { "mcp-session-id": this.sid, "mcp-protocol-version": "2025-03-26" } : {}) };
   }
   async init(name) {
     const r = await request(`${BASE}/mcp`, {
-      method: "POST", headers: this.headers(),
+      method: "POST", headers: this.headers(), agent: this.agent,
       body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize",
         params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name, version: "0" } } }),
     });
     this.sid = r.headers["mcp-session-id"];
     if (r.status !== 200 || !this.sid) throw new Error(`initialize → ${r.status} ${r.text.slice(0, 200)}`);
-    await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+    await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), agent: this.agent, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
     return this;
   }
   async rpc(method, params = {}) {
     const id = this.nextId++;
-    const r = await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
+    const r = await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), agent: this.agent, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
     if (r.status !== 200) throw new Error(`${method} → HTTP ${r.status} ${r.text.slice(0, 200)}`);
     const msgs = r.text.trim().startsWith("{") ? [JSON.parse(r.text)]
       : r.text.split("\n").filter((l) => l.startsWith("data:")).map((l) => JSON.parse(l.slice(5)));
@@ -124,7 +130,7 @@ class McpHttpClient {
     const u = new URL(`${BASE}/mcp`);
     const mod = u.protocol === "https:" ? https : http;
     return new Promise((resolve, reject) => {
-      this.sse = mod.request(u, { method: "GET", headers: { ...this.headers(), accept: "text/event-stream" }, rejectUnauthorized: false }, (res) => {
+      this.sse = mod.request(u, { method: "GET", headers: { ...this.headers(), accept: "text/event-stream" }, agent: this.agent, rejectUnauthorized: false }, (res) => {
         if (res.statusCode !== 200) { reject(new Error(`GET SSE → ${res.statusCode}`)); res.resume(); return; }
         let buf = "";
         res.on("data", (c) => {
@@ -287,6 +293,58 @@ if (MAX_SESSIONS > 0) {
   }
 }
 
+if (IDLE_MS > 0) {
+  // A client that dies mid-screencast (no DELETE, sockets just gone) must not
+  // keep its session + daemon connection + CDP screencast alive forever.
+  console.log("# idle sweep (client drops sockets mid-screencast, no DELETE)");
+  const ANIM_URL = "data:text/html," + encodeURIComponent(
+    `<style>@keyframes s{from{transform:translateX(0)}to{transform:translateX(300px)}}
+     #b{width:80px;height:80px;background:#36c;animation:s 1s linear infinite alternate}</style><div id="b"></div>`);
+  const agent = new (TLS ? https : http).Agent({ keepAlive: true });
+  const sessionsNow = async () => JSON.parse((await request(`${BASE}/health`)).text).sessions;
+  const c = await new McpHttpClient({}, agent).init("smoke-idle");
+  await c.listen();
+  const nav = await c.rpc("tools/call", { name: "page_navigate", arguments: { url: ANIM_URL } });
+  ok(!nav.isError, "page_navigate (animated data: URL)");
+  const castUri = (await c.rpc("resources/list")).resources.map((r) => r.uri)
+    .find((u) => /^browser:\/\/session\/[^/]+\/page\/[^/]+\/screencast$/.test(u));
+  const t0 = Date.now();
+  await c.rpc("resources/subscribe", { uri: castUri });
+  await waitFor(() => c.updates(castUri, t0).length >= 1, 5000);
+  ok(c.updates(castUri, t0).length >= 1, `subscribed to ${castUri} → ${c.updates(castUri, t0).length} updates`);
+  const before = await sessionsNow();
+  const budget = IDLE_MS + Math.min(60_000, Math.max(1_000, Math.floor(IDLE_MS / 4))) + 5_000;
+  // Quiet but alive: no requests, but its GET SSE stream is still open → kept.
+  await sleep(budget);
+  ok(await sessionsNow() === before, `quiet client with open SSE stream survives ${budget}ms (> idle)`);
+  const stoppedBefore = CONTAINER ? daemonLogCount("screencast stopped") : 0;
+  // Die: drop the SSE stream and every pooled socket, send nothing more.
+  c.sse.destroy();
+  agent.destroy();
+  const dropped = Date.now();
+  let after = before;
+  while (Date.now() - dropped < budget && (after = await sessionsNow()) >= before) await sleep(250);
+  ok(after === before - 1, `/health sessions ${before} → ${after} after ${((Date.now() - dropped) / 1000).toFixed(1)}s (idle ${IDLE_MS}ms)`);
+  if (CONTAINER) {
+    await waitFor(() => daemonLogCount("screencast stopped") > stoppedBefore, 5000);
+    ok(daemonLogCount("screencast stopped") > stoppedBefore, "daemon logged 'screencast stopped' after the idle close");
+  }
+  // The stale session id now gets the spec'd 404 (client must re-initialize).
+  const stale = await request(`${BASE}/mcp`, { method: "POST", headers: c.headers(), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
+  ok(stale.status === 404 && JSON.parse(stale.text).error?.code === -32001, `stale sid POST → ${stale.status} ${stale.text.slice(0, 80)}`);
+  const staleGet = await new Promise((resolve) => {
+    const u = new URL(`${BASE}/mcp`);
+    (TLS ? https : http).request(u, { method: "GET", headers: { ...c.headers(), accept: "text/event-stream" }, rejectUnauthorized: false }, (res) => {
+      resolve(res.statusCode); res.resume();
+    }).on("error", (e) => resolve(`error ${e.code}`)).end();
+  });
+  ok(staleGet === 404, `stale sid GET (SSE) → ${staleGet}`);
+  const re = await new McpHttpClient().init("smoke-idle-reinit");
+  const reList = await re.rpc("tools/list").then((r) => r.tools.length, (e) => e.message);
+  ok(typeof reList === "number", `fresh initialize after 404 → tools/list ${reList} tools`);
+  ok((await re.close()) === 200, "re-initialized session DELETE");
+}
+
 if (SESSION_RATE > 0) {
   // Authenticated requests are bucketed per MCP session: exhausting A's bucket
   // must not affect B, even though both come from the same IP.
@@ -321,6 +379,16 @@ if (RATE > 0) {
   console.log("# failed-auth rate limit");
   const liveClient = await new McpHttpClient().init("smoke-live");
   const n = RATE + 10;
+  // A known live session id skips the failed-auth pre-check, but a bad token
+  // on it still draws from (and is refused by) the per-IP failed-auth bucket.
+  const sidFlood = await Promise.all(
+    Array.from({ length: n }, () =>
+      request(`${BASE}/mcp`, { method: "POST", headers: { ...liveClient.headers(), authorization: "Bearer nope" }, body: "{}" }),
+    ),
+  );
+  const sidLimited = sidFlood.filter((r) => r.status === 429).length;
+  ok(sidLimited > 0 && sidFlood.every((r) => r.status === 401 || r.status === 429),
+    `known sid + bad token burst of ${n} → ${sidLimited}×429, ${sidFlood.filter((r) => r.status === 401).length}×401`);
   const results = await Promise.all(
     Array.from({ length: n }, () =>
       request(`${BASE}/mcp`, { method: "POST", headers: { ...mcpHeaders, authorization: "Bearer nope" }, body: "{}" }),
