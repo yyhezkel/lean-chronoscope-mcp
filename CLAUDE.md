@@ -165,8 +165,17 @@ incl. evaluate, `input.*`, `emulate.*`, `intercept.add/remove`, `cookies.set/cle
 `storage.set/remove/clear`, `indexeddb.clear`, `screenshot.take`, `snapshot.take`)
 run under a per-session FIFO mutex (`Session.lock`, `src/shared/mutex.ts`;
 allowlist `LOCKED_METHODS` in `rpc-handlers.ts`), so un-awaited calls (navigate →
-snapshot) keep their order. `wait.for` / `network.wait_for`, read-only queries and
-`session.close` deliberately bypass it.
+snapshot) keep their order. `wait.for` / `network.wait_for`, read-only queries,
+`session.close` and `page.close` deliberately bypass it (so a stuck page can
+always be closed). Each locked op is bounded by `LOCKED_OP_TIMEOUT_MS` (60s;
+navigate gets its own `timeoutMs`+5s if longer): on expiry the lock is released
+and the RPC fails with TIMEOUT (-32005), but the puppeteer call may keep running
+until it settles, the page navigates, or `page_close` kills it — e.g. an
+`awaitPromise` evaluate that never settles, or a JS `alert`/`confirm` opened by a
+click (dialogs are not auto-dismissed). Queued locked RPCs re-check the Chrome
+relaunch gate once they acquire the lock. `SessionRegistry.ensure` dedupes
+concurrent creations of one id (in-flight promise map), so racing navigates /
+HTTP initializes on a brand-new id share one Session.
 
 Session DBs open with
 `auto_vacuum=INCREMENTAL` + `wal_autocheckpoint=1000` + `journal_size_limit=64MB`,
@@ -186,6 +195,7 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` | `10` | keep newest N snapshots per page |
 | `LEAN_CHRONOSCOPE_PAGE_IDLE_MS` | `900000` (15min) | reaper closes non-selected pages idle longer than this; `0` disables |
 | `LEAN_CHRONOSCOPE_MAX_PAGES_PER_SESSION` | `20` | reaper closes oldest-idle non-selected pages beyond this cap; `0` disables |
+| `LEAN_CHRONOSCOPE_LOCKED_OP_TIMEOUT_MS` | `60000` | max time a locked RPC may hold the session lock before failing with TIMEOUT; `0` disables |
 | `LEAN_CHRONOSCOPE_FONT_WATCH` | `1` | auto-restart daemon when fonts change in `FONTS_DIR`; `0` disables |
 | `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
