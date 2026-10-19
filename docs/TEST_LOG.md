@@ -260,3 +260,15 @@ Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Sum
 `LC_CONTAINER=lc-test-f node scripts/smoke-test-m2-mcp.mjs` — 0 ✗ (LC_CONTAINER support added)
 
 `LC_CONTAINER=lc-test-f node scripts/test-all-tools.mjs` — Summary: **58/58 PASS**
+
+---
+
+## 2026-10-19 — v1.7.0 integration (feat/followups-sweep, all waves merged, test container)
+
+- vitest (redaction) ............................................ 15/15 PASS
+- test-all-tools ................................................ 58/58 PASS
+- smoke-test-v17-lifecycle (PAGE_IDLE_MS=6s, cap 3) ............. 7/7 PASS
+- smoke-test-v17-relaunch (pkill -9 chrome) ..................... ALL PASS
+- smoke-test-v17-screencast ..................................... PASS
+- smoke-test-m2-mcp ............................................. PASS
+- smoke-test-http-bridge (plain http) ........................... PASS

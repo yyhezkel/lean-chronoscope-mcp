@@ -10,7 +10,7 @@ Chromium, real CDP) over a single shared session, then closes that session.
 
 `Where`: `inline` = tested directly in the control runner; otherwise the file under `scripts/tools/`.
 
-_Last run: **2026-07-16** — **58/58 PASS** (v1.6.0)._
+_Last run: **2026-10-19** — **58/58 PASS** (v1.7.0)._
 
 ## Session
 - [x] `session_list` — lists our session — _inline_

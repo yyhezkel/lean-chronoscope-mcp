@@ -1,6 +1,6 @@
 # Follow-ups
 
-Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
+Known deferrals and rough edges, not blocking v1.7.0. Ordered roughly by value.
 
 ## Features deferred past v1.0
 
@@ -16,7 +16,7 @@ Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
 ## Robustness (found during live testing, 2026-05-28)
 
 - ~~**Concurrent tool calls can race.**~~ **Resolved (v1.7.0).** `dispatch()` now runs every browser/page-mutating RPC (`LOCKED_METHODS`: `page.*`, `input.*`, `emulate.*`, `intercept.add/remove`, `cookies.set/clear`, `storage.set/remove/clear`, `indexeddb.clear`, `screenshot.take`, `snapshot.take`) under a per-session FIFO promise-chain mutex (`Session.lock`, `src/shared/mutex.ts`), so an un-awaited `page_navigate` → `snapshot_take` keeps its order and concurrent navigates on a page-less session create one page. Long polls (`wait.for`, `network.wait_for`), read-only queries and `session.close` bypass the lock. Smoke: `scripts/smoke-test-v17-lifecycle.mjs`.
-- **`network_list` is empty right after a fresh navigate.** The top-level document request fires `requestWillBeSent` before `frameNavigated` creates the nav row, so it's stored with `nav_id = NULL`. `network_list`'s default scope filters to the latest nav id and hides it. `network_wait_for` / `network_search` (no nav filter) do find it. Fix options: attribute null-nav requests to the page's newest nav at read time, or include null-nav rows in the current-nav default scope.
+- ~~**`network_list` is empty right after a fresh navigate.**~~ **Resolved (v1.7.0).** The default nav scope now also claims the request whose `request_id` equals the latest nav's `loader_id` (Chrome reuses the loader id as the document request id), so the document request is in scope without a timing window. Same-document navigations (pushState/hash, same loader id) no longer open a new nav row — they update the current row's url.
 - ~~**Sessions accumulate; nothing closes them mid-run.**~~ **Resolved (v1.3.0).** A background **reaper** now evicts idle sessions (idle past `LEAN_CHRONOSCOPE_IDLE_MS`, default 30min) and oversized ones (`LEAN_CHRONOSCOPE_SIZE_CAP_BYTES`, default 500MB), prunes over-long console/network/snapshot rows, and runs the age-retention sweep (`LEAN_CHRONOSCOPE_RETENTION_DAYS`, default 7) ~hourly rather than only at daemon start. The HTTP bridge also closes its daemon session on client disconnect (`transport.onclose`), so BrowserContexts/SQLite no longer leak per HTTP connection. A persistent `registry.sqlite` tracks all sessions across restarts. Smokes still `session_close` when done as good hygiene, but leaked sessions are now reaped automatically.
 - ~~**Shared session never reaped / one disconnect closes it for everyone.**~~ **Resolved (2026-10-19).** `dispatch()` no longer refreshes `lastActivity` for lifecycle/meta RPCs (`session.ensure`, `session.list`, `status`, `resources.*`, …), so connect-only churn on a pinned `x-lc-session` (or stdio `default`) no longer keeps an idle session alive. The HTTP bridge refcounts transports per daemon session and closes it only when the last one disconnects. Daemon shutdown is bounded (20s, then SIGKILL Chrome) to fit `stop_grace_period`; compose caps `cpus: "2"`.
 - ~~**No page-level reaper.**~~ **Resolved (v1.7.0).** Pages now track `lastActivity`/`inFlight`, and the reaper tick closes non-selected pages idle past `LEAN_CHRONOSCOPE_PAGE_IDLE_MS` (default 15min) and enforces `LEAN_CHRONOSCOPE_MAX_PAGES_PER_SESSION` (default 20) by closing the oldest-idle non-selected pages over the cap. Never the selected page or one with an RPC in flight; skipped while the session lock is held, and done under it.
@@ -50,7 +50,7 @@ If your client shares the host's network (stdio `docker exec`, or loopback HTTP)
 ## Cosmetic / ergonomics
 
 - ~~**`session_new` can't create a *different* session id**~~ **Resolved (v1.4.0).** `session_new` still only opens a page in the connection's own session (its description now says so), but `session_attach` (v1.4.0) covers switching to — or creating — a session by id or title, with untrusted ids validated by `assertSafeSessionId()`.
-- **Benign "intercept client detach failed" warning** logged on every page close. `InterceptionEngine.detach` awaits `client.detach()` inside a try/catch; when the page is already closed it logs a warning. Harmless (caught), but noisy — could check page-closed state first and skip the detach.
+- ~~**Benign "intercept client detach failed" warning**~~ **Resolved (v1.7.0).** `InterceptionEngine.detach` skips CDP calls when the session is already detached / has no connection; residual target-closed errors log at debug.
 
 ## Notes
 
