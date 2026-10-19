@@ -286,6 +286,8 @@ export class RpcDispatcher {
     this.browser = browser;
     this.chromeRelaunches++;
     this.lastChromeRelaunchAt = Date.now();
+    // Dead pages may never fire "close", so drop their screencasts explicitly.
+    await this.screencast.dispose();
     await this.sessions.rebind(browser);
   }
 
