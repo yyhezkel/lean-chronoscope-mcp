@@ -15,6 +15,7 @@ All tests are end-to-end against a running `browser-mcp` Docker container (real 
 | `scripts/smoke-test-m3.mjs` | M3 | cookies + localStorage + IndexedDB + interception (respond) + emulation (viewport/UA/network/geo) + redaction (Authorization stripped for external hosts) | stdio |
 | `scripts/smoke-test-m5m6.mjs` | M5/M6 | tool registry + snapshot_diff + performance_metrics + console/network FTS5 search + daemon_status + screenshot rescaling cap | stdio |
 | `scripts/smoke-test-http-bridge.mjs` | v1.7 | HTTP bridge over real HTTP(S): /health, bad/missing token 401, initialize + tools/list, body cap 413 (Content-Length + chunked), session cap 503 (`LC_MAX_SESSIONS`), rate-limit burst 429 + Retry-After, TLS mode (`https://` URL) + plain-http-on-TLS-port fails | HTTP (`LC_HTTP_URL`/`LC_HTTP_TOKEN`) |
+| `scripts/smoke-test-v17-screencast.mjs` | v1.7 | screencast resource: listed as image/jpeg, cold read = on-demand JPEG capture, subscribe → ≥2 `resources/updated` in 5s at ~2fps, live read = base64 JPEG blob (`/9j/`), unsubscribe → no updates + daemon log "screencast stopped", page_close while subscribed stops it cleanly (`LC_CONTAINER`) | stdio |
 | `scripts/smoke-test-v11.mjs` | v1.1 | script_evaluate + page lifecycle + session lifecycle + wait_for + network_wait_for + upload_file registration | stdio |
 
 ## Run all
@@ -31,6 +32,7 @@ node scripts/smoke-test-m2-changes.mjs
 node scripts/smoke-test-m3.mjs
 node scripts/smoke-test-m5m6.mjs
 node scripts/smoke-test-v11.mjs
+node scripts/smoke-test-v17-screencast.mjs
 ```
 
 Each script exits 0 on PASS, non-zero on FAIL. Append the run to `docs/TEST_LOG.md`.

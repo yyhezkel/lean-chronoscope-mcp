@@ -14,6 +14,16 @@ interface Entry {
 }
 
 /**
+ * Per-URI lifecycle hooks: `onFirst` when a URI goes 0→1 subscribers (across
+ * all connections), `onLast` when it goes back to 0. Lets producers that cost
+ * something to run (the CDP screencast) run only while someone is listening.
+ */
+export interface UriHooks {
+  onFirst(uri: string): void;
+  onLast(uri: string): void;
+}
+
+/**
  * Owns (connectionId → uri → unsubscribe) bookkeeping on top of `Broadcaster`.
  *
  * Each connection has its own sink (provided when the connection opens). When
@@ -23,8 +33,42 @@ interface Entry {
  */
 export class SubscriptionRegistry {
   private readonly byConn = new Map<string, Map<string, Entry>>();
+  private readonly uriCounts = new Map<string, number>();
+  private hooks: UriHooks | null = null;
 
   constructor(private readonly broadcaster: Broadcaster) {}
+
+  setUriHooks(hooks: UriHooks): void {
+    this.hooks = hooks;
+  }
+
+  subscriberCount(uri: string): number {
+    return this.uriCounts.get(uri) ?? 0;
+  }
+
+  private retain(uri: string): void {
+    const n = (this.uriCounts.get(uri) ?? 0) + 1;
+    this.uriCounts.set(uri, n);
+    if (n === 1) this.runHook("onFirst", uri);
+  }
+
+  private release(uri: string): void {
+    const n = (this.uriCounts.get(uri) ?? 0) - 1;
+    if (n > 0) {
+      this.uriCounts.set(uri, n);
+      return;
+    }
+    this.uriCounts.delete(uri);
+    this.runHook("onLast", uri);
+  }
+
+  private runHook(which: keyof UriHooks, uri: string): void {
+    try {
+      this.hooks?.[which](uri);
+    } catch (err) {
+      log.warn({ err, uri, hook: which }, "subscription hook threw");
+    }
+  }
 
   subscribe(connectionId: string, uri: string, sink: NotificationSink): void {
     let conn = this.byConn.get(connectionId);
@@ -42,6 +86,7 @@ export class SubscriptionRegistry {
       }
     });
     conn.set(uri, { unsubscribe });
+    this.retain(uri);
   }
 
   unsubscribe(connectionId: string, uri: string): void {
@@ -51,6 +96,7 @@ export class SubscriptionRegistry {
     if (!entry) return;
     entry.unsubscribe();
     conn.delete(uri);
+    this.release(uri);
     if (conn.size === 0) this.byConn.delete(connectionId);
   }
 
@@ -58,8 +104,9 @@ export class SubscriptionRegistry {
   dropConnection(connectionId: string): void {
     const conn = this.byConn.get(connectionId);
     if (!conn) return;
-    for (const entry of conn.values()) {
+    for (const [uri, entry] of conn) {
       entry.unsubscribe();
+      this.release(uri);
     }
     this.byConn.delete(connectionId);
     log.debug({ connectionId }, "dropped subscriptions for connection");

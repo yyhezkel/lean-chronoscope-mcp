@@ -64,6 +64,18 @@ The bearer token lives in
 `BROWSER_MCP_HTTP_TOKEN` still honored); rotate it there + in the
 `claude mcp add` header if needed.
 
+## Screencast resource
+
+Each page lists `browser://session/{sid}/page/{pid}/screencast` (`image/jpeg`).
+Subscribing starts a CDP `Page.startScreencast` (JPEG q60, ≤1280px) for that page;
+frames are throttled to ~2fps by delaying the frame ack, only the **latest** frame
+is held (in memory — not BlobStore), and each one fires `resources/updated`. The
+screencast stops when the URI's last subscriber leaves (unsubscribe or connection
+drop — per-URI refcount via `SubscriptionRegistry.setUriHooks`) or the page closes
+(daemon logs `screencast started` / `screencast stopped`). `resources/read` returns
+an MCP `blob` content (base64 JPEG); without a live frame it captures one on demand.
+Code: `src/daemon/screencast.ts`. Smoke: `scripts/smoke-test-v17-screencast.mjs`.
+
 ## Tool-surface modes (mount-token cost)
 
 | Mode | flag / env | tools advertised | `tools/list` payload |

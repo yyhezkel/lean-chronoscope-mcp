@@ -7,6 +7,7 @@
 //   browser://session/{sid}/page/{pid}/network/live
 //   browser://session/{sid}/page/{pid}/exceptions/live
 //   browser://session/{sid}/page/{pid}/url
+//   browser://session/{sid}/page/{pid}/screencast   (image/jpeg, live while subscribed)
 //   browser://session/{sid}/intercept/rules
 //   browser://docs/tools
 
@@ -18,6 +19,7 @@ export type ResourceUri =
   | { kind: "page.network"; sessionId: string; pageId: string }
   | { kind: "page.exceptions"; sessionId: string; pageId: string }
   | { kind: "page.url"; sessionId: string; pageId: string }
+  | { kind: "page.screencast"; sessionId: string; pageId: string }
   | { kind: "session.intercept"; sessionId: string }
   | { kind: "docs.tools" };
 
@@ -70,6 +72,8 @@ export function parseUri(uri: string): ResourceUri | null {
         return { kind: "page.exceptions", sessionId, pageId };
       case "url":
         return { kind: "page.url", sessionId, pageId };
+      case "screencast":
+        return { kind: "page.screencast", sessionId, pageId };
       default:
         return null;
     }
@@ -98,6 +102,8 @@ export function buildUri(parsed: ResourceUri): string {
       return `${SCHEME}session/${parsed.sessionId}/page/${parsed.pageId}/exceptions/live`;
     case "page.url":
       return `${SCHEME}session/${parsed.sessionId}/page/${parsed.pageId}/url`;
+    case "page.screencast":
+      return `${SCHEME}session/${parsed.sessionId}/page/${parsed.pageId}/screencast`;
   }
 }
 
