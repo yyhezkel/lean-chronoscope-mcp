@@ -4,8 +4,11 @@ import type {
   UploadFileResult,
   WaitForResult,
 } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const WaitForInput = z
   .object({
@@ -48,10 +51,13 @@ export const networkWaitFor = defineTool({
   category: "network",
   inputSchema: NetworkWaitForInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<NetworkWaitForResult>("network.wait_for", {
+    const raw = await ctx.daemon.call<NetworkWaitForResult>("network.wait_for", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    const r: NetworkWaitForResult = raw.request
+      ? { ...raw, request: { ...raw.request, url: redactUrl(raw.request.url, REDACT_CFG) } }
+      : raw;
     const msg = r.matched
       ? `Matched #${r.request?.id} ${r.request?.method} ${r.request?.status} ${r.request?.url} after ${r.waitedMs}ms`
       : `Timed out after ${r.waitedMs}ms`;

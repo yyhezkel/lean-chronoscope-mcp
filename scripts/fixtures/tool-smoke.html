@@ -64,6 +64,8 @@
       .then((r) => r.text())
       .then((t) => { window.__api = t; })
       .catch(() => {});
+    // Request with a secret query param — network tools must redact its value.
+    fetch("https://tool-smoke.test/api/data?access_token=SECRET123&page=1").catch(() => {});
   </script>
 </body>
 </html>

@@ -11,7 +11,7 @@ Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
 
 ## Security / correctness
 
-- **`network_list` URL redaction.** Redaction runs in `network_get` (headers + bodies) but not on `network_list` summaries. A URL with inline credentials (`https://user:pass@host`) would appear unredacted in the list. See `docs/SECURITY.md` "Known limitations".
+- ~~**Page-URL redaction.** Network/console tool output is now URL-redacted, but `page_list` / `page_navigate` / snapshot URLs are not.~~ **Resolved (v1.7.0).** `redactUrl` now covers network/console tools, all page/session tools that echo a page URL, `screenshot_take`, snapshot header/diff URLs, and MCP resource reads (text + structuredContent). Link hrefs inside snapshot bodies remain unredacted by design (see `docs/SECURITY.md` "Known limitations").
 
 ## Robustness (found during live testing, 2026-05-28)
 

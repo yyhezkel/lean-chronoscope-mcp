@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { ConsoleSearchResult, NetworkSearchResult } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactBody, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const SearchInput = z.object({
   query: z.string().min(1).describe("FTS5 MATCH expression, e.g. `error AND timeout`"),
@@ -14,10 +17,19 @@ export const consoleSearch = defineTool({
   category: "console",
   inputSchema: SearchInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<ConsoleSearchResult>("console.search", {
+    const raw = await ctx.daemon.call<ConsoleSearchResult>("console.search", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    // Search rows carry no source url → gated as external (see shouldRedact).
+    const r: ConsoleSearchResult = {
+      ...raw,
+      rows: raw.rows.map((m) => ({
+        ...m,
+        text: redactBody(m.text, null, REDACT_CFG)!,
+        snippet: redactBody(m.snippet, null, REDACT_CFG)!,
+      })),
+    };
     const body =
       r.rows.length === 0
         ? "(no matches)"
@@ -35,10 +47,20 @@ export const networkSearch = defineTool({
   category: "network",
   inputSchema: SearchInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<NetworkSearchResult>("network.search", {
+    const raw = await ctx.daemon.call<NetworkSearchResult>("network.search", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    // The snippet is currently the URL itself (reader.ts) but may become body text,
+    // so run both URL and body redaction over it, gated on the request's url.
+    const r: NetworkSearchResult = {
+      ...raw,
+      rows: raw.rows.map((m) => ({
+        ...m,
+        url: redactUrl(m.url, REDACT_CFG),
+        snippet: redactBody(redactUrl(m.snippet, REDACT_CFG), m.url, REDACT_CFG)!,
+      })),
+    };
     const body =
       r.rows.length === 0
         ? "(no matches)"

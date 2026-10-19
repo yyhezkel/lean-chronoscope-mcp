@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { SnapshotDiffResult, SnapshotTakeResult } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const SnapshotTakeInput = z.object({
   pageId: z.string().optional(),
@@ -14,10 +17,12 @@ export const snapshotTake = defineTool({
   category: "snapshot",
   inputSchema: SnapshotTakeInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<SnapshotTakeResult>("snapshot.take", {
+    const raw = await ctx.daemon.call<SnapshotTakeResult>("snapshot.take", {
       sessionId: ctx.sessionId,
       pageId: input.pageId,
     });
+    // Header/structured page URL only — link hrefs inside the tree text are not redacted.
+    const r: SnapshotTakeResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
     return new McpResponse()
       .addSection(
         "Page",
@@ -44,10 +49,15 @@ export const snapshotDiff = defineTool({
   category: "snapshot",
   inputSchema: SnapshotDiffInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<SnapshotDiffResult>("snapshot.diff", {
+    const raw = await ctx.daemon.call<SnapshotDiffResult>("snapshot.diff", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    const r: SnapshotDiffResult = {
+      ...raw,
+      beforeUrl: redactUrl(raw.beforeUrl, REDACT_CFG),
+      afterUrl: redactUrl(raw.afterUrl, REDACT_CFG),
+    };
     const summary = `Diff #${r.beforeId} → #${r.afterId}\nadded=${r.addedUids} removed=${r.removedUids} changed=${r.changedUids} unchanged=${r.unchangedUids}`;
     return new McpResponse()
       .addSection("Summary", summary)

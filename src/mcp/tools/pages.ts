@@ -8,8 +8,11 @@ import type {
   PageNewResult,
   PageSelectResult,
 } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const PageNavigateInput = z.object({
   url: z.string().url(),
@@ -24,13 +27,14 @@ export const pageNavigate = defineTool({
   category: "pages",
   inputSchema: PageNavigateInput,
   handler: async (input, ctx) => {
-    const result = await ctx.daemon.call<PageNavigateResult>("page.navigate", {
+    const raw = await ctx.daemon.call<PageNavigateResult>("page.navigate", {
       sessionId: ctx.sessionId,
       pageId: input.pageId,
       url: input.url,
       waitUntil: input.waitUntil,
       timeoutMs: input.timeoutMs,
     });
+    const result: PageNavigateResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
     return new McpResponse()
       .addSection(
         "Result",
@@ -47,7 +51,8 @@ export const pageList = defineTool({
   category: "pages",
   inputSchema: z.object({}),
   handler: async (_input, ctx) => {
-    const r = await ctx.daemon.call<PageListResult>("page.list", { sessionId: ctx.sessionId });
+    const raw = await ctx.daemon.call<PageListResult>("page.list", { sessionId: ctx.sessionId });
+    const r: PageListResult = { ...raw, pages: raw.pages.map((p) => ({ ...p, url: redactUrl(p.url, REDACT_CFG) })) };
     const body =
       r.pages.length === 0
         ? "(no pages)"
@@ -70,11 +75,12 @@ export const pageNew = defineTool({
     background: z.boolean().optional(),
   }),
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<PageNewResult>("page.new", {
+    const raw = await ctx.daemon.call<PageNewResult>("page.new", {
       sessionId: ctx.sessionId,
       url: input.url,
       background: input.background,
     });
+    const r: PageNewResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
     return new McpResponse()
       .addSection("Result", `Opened ${r.pageId}\n${r.title || "(untitled)"} — ${r.url}`)
       .setStructured(r as unknown as Record<string, unknown>)
@@ -123,10 +129,11 @@ function historyTool(name: string, method: DaemonMethod, verb: string) {
     category: "pages",
     inputSchema: z.object({ pageId: z.string().optional() }),
     handler: async (input, ctx) => {
-      const r = await ctx.daemon.call<PageHistoryResult>(method, {
+      const raw = await ctx.daemon.call<PageHistoryResult>(method, {
         sessionId: ctx.sessionId,
         pageId: input.pageId,
       });
+      const r: PageHistoryResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
       const msg = r.navigated ? `${verb} → ${r.url}` : `Nothing to ${verb.toLowerCase()}`;
       return new McpResponse()
         .addSection("Result", msg)

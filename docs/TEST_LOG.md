@@ -194,3 +194,26 @@ TLS (self-signed cert, `HTTP_TLS_CERT/KEY`, `HTTP_MAX_SESSIONS=2`), `LC_HTTP_URL
 Only `HTTP_TLS_CERT` set → "HTTP bridge NOT started" logged, port refuses (curl exit 56) ... PASS
 
 `LC_CONTAINER=lc-test-c node scripts/test-all-tools.mjs` (stdio) — Summary: **58/58 PASS**
+## 2026-10-19 — redaction gaps (URL redaction across network/console tools)
+
+- `pnpm test` (vitest, `src/shared/redact.test.ts`) ................. 15/15 PASS
+- `scripts/test-all-tools.mjs` on test container `lc-test-a` ........ 58/58 PASS
+  - new: seed fetches `/api/data?access_token=SECRET123`; `SECRET123` absent from
+    text + structuredContent of network_wait_for / network_list / network_get /
+    network_search (search still matches it via FTS) ................ PASS
+
+Summary: **58/58 PASS** + 15/15 unit
+
+---
+
+## 2026-10-19 — page-URL redaction (page/session/screenshot/snapshot tools + resources)
+
+- `pnpm test` (vitest) ............................................... 15/15 PASS
+- `scripts/test-all-tools.mjs` on test container `lc-test-a` ........ 58/58 PASS
+  - new: seed page served at `/?access_token=SECRET456`; `SECRET456` (and
+    `SECRET123`) absent from text + structuredContent of page_navigate /
+    page_list / screenshot_take, and from all network tool outputs (incl.
+    the document request + `Referer` header) ........................ PASS
+- manual: `resources/read` of `…/url`, `…/pages`, `…/network/live` → redacted .. PASS
+
+Summary: **58/58 PASS** + 15/15 unit

@@ -24,16 +24,22 @@ for v1.0.
 | HTTP+SSE bridge (opt-in) | Disabled unless `LEAN_CHRONOSCOPE_HTTP_TOKEN` set. Requires `Authorization: Bearer <token>`. Constant-time token compare (`timingSafeEqual` over SHA-256 digests — no length leak). Binds `127.0.0.1` by default — **never** expose it beyond loopback without TLS (built-in via `HTTP_TLS_CERT`/`_KEY`, or a TLS-terminating proxy). Half-configured TLS (only cert or only key) → bridge refuses to start. POST body cap (default 4 MiB → 413), per-client-IP token-bucket rate limit (default 600/min → 429 + `Retry-After`; failed auth attempts count, so token brute force is throttled; `/health` exempt), concurrent MCP-session cap (default 64 → 503). |
 | Process user | Container runs as non-root `mcp:1500`. |
 | Chrome flags | `--no-sandbox` (required in container) + `--disable-dev-shm-usage`; `shm_size: 2g`. |
-| Secret leakage in captures | 3-mode redaction (`src/shared/redact.ts`), default `external`: redacts Authorization/Cookie/API-key headers + token-shaped body values for non-trusted hosts. Applied in `network_get`. |
+| Secret leakage in captures | 3-mode redaction (`src/shared/redact.ts`), default `external`: redacts Authorization/Cookie/API-key headers, token-shaped body values, and URL credentials (userinfo + secret-named query/fragment params, also inside `Referer`/`Location`) for non-trusted hosts. Applied in the MCP tool layer to text **and** `structuredContent` of `network_list`/`network_get`/`network_search`/`network_wait_for` and `console_list`/`console_get`/`console_search` (console rows gate on their source url; rows without one are treated as external). Page URLs are redacted the same way in `page_navigate`/`page_list`/`page_new`/`page_back`/`page_forward`/`page_reload`/`session_new`, `screenshot_take`, the `snapshot_take` header + `snapshot_diff` `beforeUrl`/`afterUrl`, and MCP resource reads (`…/url`, `…/pages`, console/network/exceptions live feeds). |
 | Blob paths | Blobs stored under `/var/lib/lean-chronoscope/sessions/<id>/blobs`; only sha referenced in tool output, not host paths. |
 | Logs | pino → file only, never stdout (stdout is MCP framing). Rotated at 10MB, 5 archives. |
 | Retention | Session dirs older than `LEAN_CHRONOSCOPE_RETENTION_DAYS` (default 7) swept on daemon start. |
 
 ## Known limitations (acceptable for v1.0)
 
-- **`network_list` summaries are not redacted** — only `network_get` is. URLs with
-  inline credentials (`https://user:pass@host`) would appear in the list. Mitigation:
-  redaction of list URLs is a follow-up; avoid credential-in-URL flows.
+- **Redaction is output-side only.** The SQLite capture (and FTS index) stores raw
+  URLs/headers/bodies; tools redact what they return. So FTS still *matches* on a
+  secret value (e.g. `network_search` for a token finds the request), it just
+  never echoes it. Anyone with direct access to the session DB sees raw data.
+- **Snapshot bodies are not URL-redacted.** Only the page URL in the `snapshot_take`
+  header/structured output is; link `href`s and other URLs inside the accessibility
+  tree text (and `snapshot_diff` patches) are passed through. Values read back by
+  storage/cookie/`script_evaluate` tools are likewise raw — they reflect live page
+  state the caller can already read.
 - **HTTP bridge rate limiting is keyed on the socket peer IP.** `X-Forwarded-For`
   is deliberately not trusted, so behind a reverse proxy all clients share one
   bucket — raise `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` (or rate-limit at the proxy).
