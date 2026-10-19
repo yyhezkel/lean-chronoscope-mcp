@@ -66,6 +66,10 @@ export interface ExceptionSummary {
 export interface ListOptions {
   pageId?: string;
   navId?: number;
+  /** loader_id of `navId`'s navigation row — lets listNetwork claim that nav's
+   *  own document request, which is captured before `framenavigated` stamps the
+   *  new nav id (see listNetwork). */
+  navLoaderId?: string;
   level?: string;
   sinceTs?: number;
   limit: number;
@@ -81,6 +85,20 @@ export class SessionReader {
       .prepare("SELECT id FROM navigations WHERE page_id = ? ORDER BY started_at DESC LIMIT ?")
       .all(pageId, maxLast)
       .map((r: any) => r.id as number);
+  }
+
+  /** Newest navigation of a page with its loader id, or null if none yet. */
+  getLatestNav(pageId: string): { id: number; loaderId: string } | null {
+    const r = this.db
+      .prepare("SELECT id, loader_id FROM navigations WHERE page_id = ? ORDER BY started_at DESC, id DESC LIMIT 1")
+      .get(pageId) as any;
+    return r ? { id: r.id, loaderId: r.loader_id } : null;
+  }
+
+  /** loader_id of a specific navigation row (null if unknown id). */
+  getNavLoaderId(navId: number): string | null {
+    const r = this.db.prepare("SELECT loader_id FROM navigations WHERE id = ?").get(navId) as any;
+    return r ? (r.loader_id as string) : null;
   }
 
   listConsole(opts: ListOptions): { rows: ConsoleSummary[]; total: number } {
@@ -148,12 +166,29 @@ export class SessionReader {
     rows: NetworkSummary[];
     total: number;
   } {
-    const filters: Record<string, unknown> = {
-      page_id: opts.pageId,
-      nav_id: opts.navId,
-    };
+    const filters: Record<string, unknown> = { page_id: opts.pageId };
     const extras: string[] = [];
     const extraParams: unknown[] = [];
+    if (opts.navId != null) {
+      // Read-time attribution of the navigation's own document request. The
+      // collector stamps rows with the nav id current at *request* time, but the
+      // main-frame document request fires before `framenavigated` inserts the
+      // new nav row — so it carries the previous nav id (or NULL on the first
+      // navigation) and a plain `nav_id = ?` drops it. Chrome gives a
+      // navigation request a CDP requestId equal to the navigation's loaderId,
+      // which is exactly what the nav row stores, so `request_id = loader_id`
+      // claims it with no timing window (an epsilon on ts would be unsafe:
+      // the gap is the full server response latency, unbounded, and a window
+      // would also sweep in the old page's unload beacons). Redirect hops reuse
+      // the same requestId and are deduped at capture, so this is one row.
+      if (opts.navLoaderId) {
+        extras.push("(nav_id = ? OR request_id = ?)");
+        extraParams.push(opts.navId, opts.navLoaderId);
+      } else {
+        extras.push("nav_id = ?");
+        extraParams.push(opts.navId);
+      }
+    }
     if (opts.sinceTs != null) {
       extras.push("ts_request >= ?");
       extraParams.push(opts.sinceTs);

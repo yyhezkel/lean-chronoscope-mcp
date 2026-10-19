@@ -116,11 +116,19 @@ export class InterceptionEngine {
     const client = this.pages.get(pageId);
     if (!client) return;
     this.pages.delete(pageId);
+    // On page close the target (and with it this CDP session) is usually
+    // already gone — nothing to disable or detach, and trying just throws.
+    if (client.detached || !client.connection()) return;
     try {
       if (this.rules.size > 0) await client.send("Fetch.disable").catch(() => {});
       await client.detach();
     } catch (err) {
-      log.warn({ err, pageId }, "intercept client detach failed");
+      // Lost the race with target teardown: expected, not worth a warning.
+      if (/Target closed|Session closed|detached/i.test(err instanceof Error ? err.message : String(err))) {
+        log.debug({ err, pageId }, "intercept client already detached");
+      } else {
+        log.warn({ err, pageId }, "intercept client detach failed");
+      }
     }
   }
 
