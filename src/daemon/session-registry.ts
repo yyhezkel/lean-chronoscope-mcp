@@ -66,6 +66,8 @@ export interface Session {
 
 export class SessionRegistry {
   readonly sessions = new Map<string, Session>();
+  /** In-flight `ensure()` creations, keyed by session id (see ensure). */
+  private readonly creating = new Map<string, Promise<Session>>();
 
   constructor(
     private browser: Browser,
@@ -107,6 +109,34 @@ export class SessionRegistry {
       return { session: existing, created: false };
     }
 
+    // Dedupe concurrent creates of the same id: without this, two callers that
+    // both miss the map (e.g. concurrent page.navigate on a brand-new id, or two
+    // HTTP initializes with the same x-lc-session) each build a Session across
+    // the `await createBrowserContext()` — the second overwrites the first,
+    // leaking a BrowserContext + a second SQLite handle on the same db file and
+    // splitting the lock. Late joiners get created:false (and their title, if
+    // the first caller supplied none).
+    const pending = this.creating.get(sessionId);
+    if (pending) {
+      const session = await pending;
+      if (title && !session.title) return this.ensure(sessionId, source, title, dataDir);
+      return { session, created: false };
+    }
+    const creation = this.create(sessionId, source, title, dataDir);
+    this.creating.set(sessionId, creation);
+    try {
+      return { session: await creation, created: true };
+    } finally {
+      this.creating.delete(sessionId);
+    }
+  }
+
+  private async create(
+    sessionId: string,
+    source?: SessionSource,
+    title?: string,
+    dataDir?: string,
+  ): Promise<Session> {
     const context = await this.browser.createBrowserContext();
     const db = openSessionDb(sessionId, dataDir);
     const blobs = new BlobStore(sessionId, dataDir);
@@ -144,7 +174,7 @@ export class SessionRegistry {
     });
     log.info({ sessionId, source }, "session created");
     this.broadcast(buildUri({ kind: "sessions" }), "sessions");
-    return { session, created: true };
+    return session;
   }
 
   get(sessionId: string): Session {
@@ -254,6 +284,7 @@ export class SessionRegistry {
   async rebind(browser: Browser): Promise<void> {
     this.browser = browser;
     for (const s of Array.from(this.sessions.values())) {
+      if (this.sessions.get(s.id) !== s) continue; // closed while an earlier one rebound
       try {
         for (const ps of s.pages.values()) {
           this.disposePage(ps);
@@ -266,7 +297,14 @@ export class SessionRegistry {
         s.pages.clear();
         s.selectedPageId = null;
         s.intercept.resetPages();
-        s.context = await browser.createBrowserContext();
+        const context = await browser.createBrowserContext();
+        // session.close / the reaper may have closed this session while we
+        // awaited; adopting the context then would leak it.
+        if (this.sessions.get(s.id) !== s) {
+          await context.close().catch((e) => log.warn({ err: e, sessionId: s.id }, "rebind: close orphan context"));
+          continue;
+        }
+        s.context = context;
         log.info({ sessionId: s.id, rules: s.intercept.list().length }, "session rebound to relaunched Chrome");
         this.broadcast(buildUri({ kind: "session.pages", sessionId: s.id }), "pages");
       } catch (err) {

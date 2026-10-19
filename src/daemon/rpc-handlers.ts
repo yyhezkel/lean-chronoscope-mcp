@@ -115,6 +115,8 @@ import type { PageState } from "./session-registry.js";
 import { formatSnapshot } from "./snapshot/formatter.js";
 import { computeSnapshotDiff } from "./snapshot/diff.js";
 import { DaemonError } from "@shared/errors.js";
+import { ErrorCode } from "@shared/protocol.js";
+import { env } from "@shared/env.js";
 import { VERSION } from "@shared/version.js";
 import { getLogger } from "@shared/logger.js";
 import { SessionRegistry, type Session } from "./session-registry.js";
@@ -167,17 +169,17 @@ const PASSIVE_METHODS: ReadonlySet<string> = new Set([
  *  - read-only DB queries (console/network list/get/search, snapshot.diff) and
  *    read-only page probes (page.list, cookies.list, storage.get/list,
  *    indexeddb.list_databases/query, performance.metrics, intercept.list);
- *  - PASSIVE_METHODS, incl. `session.close`: closing mid-op just makes the
- *    locked op fail with a target-closed error, which is acceptable (and a
- *    close must never queue behind a hung navigate).
- * A hung holder can't deadlock the queue: every locked op is bounded by its own
- * puppeteer timeout (goto/waitFor defaults).
+ *  - PASSIVE_METHODS, incl. `session.close`, and `page.close`: closing mid-op
+ *    just makes the locked op fail with a target-closed error, which is
+ *    acceptable (and a close must never queue behind a hung evaluate/navigate —
+ *    closing the page is what unsticks it).
+ * A hung holder can't wedge the queue: every locked op is bounded by
+ * withOpTimeout (LOCKED_OP_TIMEOUT_MS, default 60s).
  */
 const LOCKED_METHODS: ReadonlySet<string> = new Set([
   "page.new",
   "page.navigate",
   "page.select",
-  "page.close",
   "page.back",
   "page.forward",
   "page.reload",
@@ -309,6 +311,46 @@ export class RpcDispatcher {
     }
   }
 
+  /**
+   * Bound a locked op so it can't hold the session lock for puppeteer's 180s
+   * protocolTimeout (e.g. `page.evaluate` awaiting a never-settling promise, or
+   * a click that opens a JS alert/confirm — dialogs are NOT auto-dismissed and
+   * block the page until it is closed). On expiry the lock is released and a
+   * TIMEOUT error is returned; the underlying puppeteer call may keep running
+   * in the background until it settles, the page navigates, or the page is
+   * closed (`page.close` is unlocked for exactly this reason). Ops with their
+   * own `timeoutMs` (navigate) get that plus a 5s margin if it is longer.
+   */
+  private async withOpTimeout<T>(method: string, params: unknown, fn: () => Promise<T>): Promise<T> {
+    const base = Number(env("LOCKED_OP_TIMEOUT_MS") ?? 60_000);
+    if (!(base > 0)) return fn();
+    const own = Number((params as { timeoutMs?: unknown } | undefined)?.timeoutMs);
+    const limitMs = Number.isFinite(own) && own + 5_000 > base ? own + 5_000 : base;
+    let timer: NodeJS.Timeout | undefined;
+    const op = fn();
+    op.catch(() => {}); // a late rejection after timeout must not go unhandled
+    try {
+      return await Promise.race([
+        op,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new DaemonError(
+                  ErrorCode.TIMEOUT,
+                  `${method} did not finish within ${limitMs / 1000}s and was abandoned ` +
+                    `(a never-settling promise or an open JS dialog?) — page_close the page if it stays stuck`,
+                ),
+              ),
+            limitMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async dispatch(method: DaemonMethod, params: unknown, ctx?: ConnectionContext): Promise<unknown> {
     // Passive meta RPCs (status, lists, history reads) stay answerable during a
     // relaunch; session.ensure is passive but creates a BrowserContext, so gate it.
@@ -343,7 +385,14 @@ export class RpcDispatcher {
     }
     if (page) page.inFlight++;
     try {
-      if (sess && locked) return await sess.lock.run(() => this.dispatchInner(method, params, ctx));
+      if (sess && locked) {
+        return await sess.lock.run(async () => {
+          // A Chrome crash while this RPC sat queued behind the lock: the gate
+          // above was checked before queueing, so check again now.
+          if (this.relaunching) await this.awaitRelaunch();
+          return this.withOpTimeout(method, params, () => this.dispatchInner(method, params, ctx));
+        });
+      }
       return await this.dispatchInner(method, params, ctx);
     } finally {
       if (sess) sess.inFlight--;

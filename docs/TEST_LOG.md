@@ -272,3 +272,15 @@ Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Sum
 - smoke-test-v17-screencast ..................................... PASS
 - smoke-test-m2-mcp ............................................. PASS
 - smoke-test-http-bridge (plain http) ........................... PASS
+
+---
+
+## 2026-10-19 — review/R2-core (ensure dedupe, rebind leak, relaunch re-check, locked-op timeout, unlocked page.close)
+
+- pnpm typecheck && pnpm build .................................. PASS
+- smoke-test-v17-lifecycle (PAGE_IDLE_MS=6s, tick 2s, cap 3, LOCKED_OP_TIMEOUT_MS=8s) — 14/14 PASS, ALL PASS
+  (new (e): 3 concurrent navigates on a brand-new id → 1 page, "session created" ×1;
+  new (f): hung awaitPromise evaluate → TIMEOUT in 8011ms, navigate after OK, page_close during hung evaluate 512ms).
+  First run had a one-off (b) flake (before=4: a reaper tick landed mid page_new loop); rerun PASS.
+- smoke-test-v17-relaunch (pkill -9 chrome, default env) ........ ALL PASS
+- test-all-tools (default env) .................................. Summary: 58/58 PASS
