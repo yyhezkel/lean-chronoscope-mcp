@@ -14,6 +14,7 @@ import { registerResourceHandlers } from "./resources/handlers.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 
 const log = getLogger("mcp/http");
@@ -44,6 +45,14 @@ export interface HttpBridgeOptions {
   initRatePerMin?: number;
   /** Max concurrent MCP transports; new sessions beyond it get 503. 0 = unlimited. Defaults to 64. */
   maxSessions?: number;
+  /**
+   * Close MCP sessions with no request in flight (an open GET SSE stream counts)
+   * and none started for this long, in ms. Their daemon connection, resource
+   * subscriptions and (unless shared) daemon session are released; the client
+   * gets 404 on its stale `mcp-session-id` and re-initializes. 0 disables.
+   * Defaults to 30 min.
+   */
+  idleMs?: number;
   /** PEM cert + key. When set, the bridge serves HTTPS instead of plain HTTP. */
   tls?: { cert: Buffer; key: Buffer };
 }
@@ -53,6 +62,12 @@ const DEFAULT_RATE_PER_MIN = 60;
 const DEFAULT_SESSION_RATE_PER_MIN = 600;
 const DEFAULT_INIT_RATE_PER_MIN = 120;
 const DEFAULT_MAX_SESSIONS = 64;
+const DEFAULT_IDLE_MS = 30 * 60 * 1000;
+/** TCP keepalive on long-lived GET SSE sockets, so a half-open peer gets detected and the stream closes. */
+const SSE_KEEPALIVE_MS = 60_000;
+
+/** Liveness of one MCP session: requests currently open (incl. GET SSE streams) and when one last started/ended. */
+interface Activity { inflight: number; lastSeen: number }
 /** Upper bound on tracked client IPs; stale (fully refilled) buckets are evicted first. */
 const MAX_RATE_BUCKETS = 10_000;
 
@@ -72,14 +87,17 @@ class BodyTooLargeError extends Error {}
  * (503 for new sessions beyond it). Behind docker-proxy every host client
  * shares the gateway IP, so per-session buckets keep parallel agents from
  * starving each other, and a bad-token flood can't lock out live sessions.
+ * Sessions idle past `idleMs` are closed by a sweep; unknown session ids get 404.
  */
 export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Server> {
   const sessionTransports = new Map<string, StreamableHTTPServerTransport>();
   // Live transports per daemon session. Several clients can pin the same
   // `x-lc-session`; the daemon session is closed only when the last one leaves.
   const sessionRefs = new Map<string, number>();
+  const sessionActivity = new Map<string, Activity>();
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
   const authFailLimiter = new RateLimiter(opts.ratePerMin ?? DEFAULT_RATE_PER_MIN);
   const sessionLimiter = new RateLimiter(opts.sessionRatePerMin ?? DEFAULT_SESSION_RATE_PER_MIN);
   const initLimiter = new RateLimiter(opts.initRatePerMin ?? DEFAULT_INIT_RATE_PER_MIN);
@@ -112,7 +130,10 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     // the token's contents nor its length leak through timing.
     const auth = req.headers["authorization"];
     if (!auth || !timingSafeEqual(sha256(auth), expectedAuth)) {
-      authFailLimiter.take(ip);
+      // Enforced here too: a known session id skips the pre-check above, so
+      // without this, guessing tokens alongside a live sid is unthrottled.
+      const retryAfter = authFailLimiter.take(ip);
+      if (retryAfter > 0) return rateLimited(res, retryAfter);
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
@@ -148,6 +169,16 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     // it may have closed while the body was read), or create a new one.
     let transport = sid ? sessionTransports.get(sid) : undefined;
 
+    // An unknown (expired, idle-closed, or pre-restart) session id gets the
+    // spec'd 404 so the client starts a new session with a fresh initialize —
+    // rather than a throwaway transport answering 400 "Server not initialized".
+    // An initialize that still carries a stale header is let through.
+    if (sid && !transport && !(req.method === "POST" && hasInitialize(body))) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }));
+      return;
+    }
+
     if (!transport && maxSessions > 0 && sessionTransports.size + creating >= maxSessions) {
       log.warn({ maxSessions, live: sessionTransports.size }, "HTTP MCP session cap reached");
       res.writeHead(503, { "content-type": "application/json", "retry-after": "30" });
@@ -160,7 +191,10 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     // transport whose first request never initialized doesn't leak its daemon
     // connection.
     let abandonIfUninitialized: (() => void) | undefined;
+    let activity = sid ? sessionActivity.get(sid) : undefined;
     if (!transport) {
+      const fresh: Activity = { inflight: 0, lastSeen: Date.now() };
+      activity = fresh;
       isNew = true;
       creating++;
       // Persistence: a client that sends a stable `x-lc-session` header reuses
@@ -177,6 +211,7 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
         onsessioninitialized: (newSid) => {
           initialized = true;
           sessionTransports.set(newSid, transport!);
+          sessionActivity.set(newSid, fresh);
           if (isNew) { isNew = false; creating--; }
           sessionRefs.set(browserMcpSession, (sessionRefs.get(browserMcpSession) ?? 0) + 1);
           log.info({ sid: newSid, browserMcpSession }, "HTTP MCP session initialized");
@@ -187,6 +222,7 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
         const closeSid = transport!.sessionId;
         if (!closeSid || !sessionTransports.delete(closeSid)) return; // never initialized / already closed
         sessionLimiter.delete(closeSid);
+        sessionActivity.delete(closeSid);
         dispose();
         const client = daemon!;
         const refs = (sessionRefs.get(browserMcpSession) ?? 1) - 1;
@@ -235,6 +271,17 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       };
     }
 
+    // Liveness for the idle sweep: the session is busy while any request is
+    // open (a GET SSE stream stays open for as long as its socket does), and
+    // idle-since the last one started or ended.
+    if (activity) {
+      const a = activity;
+      a.inflight++;
+      a.lastSeen = Date.now();
+      res.once("close", () => { a.inflight--; a.lastSeen = Date.now(); });
+    }
+    if (req.method === "GET") req.socket.setKeepAlive(true, SSE_KEEPALIVE_MS);
+
     try {
       await transport.handleRequest(req as any, res as any, body);
     } catch (err) {
@@ -266,6 +313,26 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     httpServer.once("error", reject);
     httpServer.listen(opts.port, opts.host ?? "127.0.0.1", () => resolve());
   });
+
+  // Idle sweep. A client that dies without DELETE never fires transport.onclose
+  // (the SDK has no idle timeout), and a page it watches (screencast) is exempt
+  // from the daemon's idle eviction — so without this its session, daemon
+  // connection and CDP screencast would live forever. transport.close() runs
+  // the normal onclose path (refcounted session.close + connection close).
+  if (idleMs > 0) {
+    const sweep = setInterval(() => {
+      const cutoff = Date.now() - idleMs;
+      for (const [sid, a] of sessionActivity) {
+        if (a.inflight > 0 || a.lastSeen > cutoff) continue;
+        const transport = sessionTransports.get(sid);
+        log.info({ sid, idleMs: Date.now() - a.lastSeen }, "closing idle HTTP MCP session");
+        sessionActivity.delete(sid); // don't re-close while close() is pending
+        void transport?.close().catch((err) => log.warn({ err, sid }, "idle transport close failed"));
+      }
+    }, Math.min(60_000, Math.max(1_000, Math.floor(idleMs / 4))));
+    sweep.unref();
+    httpServer.once("close", () => clearInterval(sweep));
+  }
   log.info(
     {
       host: opts.host ?? "127.0.0.1",
@@ -276,6 +343,7 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       sessionRatePerMin: opts.sessionRatePerMin ?? DEFAULT_SESSION_RATE_PER_MIN,
       initRatePerMin: opts.initRatePerMin ?? DEFAULT_INIT_RATE_PER_MIN,
       maxSessions,
+      idleMs,
     },
     opts.tls ? "HTTPS+SSE bridge listening (TLS)" : "HTTP+SSE bridge listening (plain HTTP, no TLS)",
   );
@@ -323,6 +391,11 @@ function rejectTooLarge(req: http.IncomingMessage, res: http.ServerResponse, max
   req.once("end", () => respond(false));
   req.once("close", () => respond(true));
   req.resume();
+}
+
+/** True when a (possibly batched) JSON-RPC body contains an initialize request. */
+function hasInitialize(body: unknown): boolean {
+  return Array.isArray(body) ? body.some((m) => isInitializeRequest(m)) : isInitializeRequest(body);
 }
 
 function rateLimited(res: http.ServerResponse, retryAfter: number): void {
