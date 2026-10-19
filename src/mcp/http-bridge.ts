@@ -108,14 +108,7 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       } catch (err) {
         if (!(err instanceof BodyTooLargeError)) throw err;
         log.warn({ maxBodyBytes, ip: req.socket.remoteAddress }, "HTTP request body too large");
-        res.writeHead(413, { "content-type": "application/json", connection: "close" });
-        res.end(JSON.stringify({ error: "payload_too_large", maxBytes: maxBodyBytes }));
-        // Stop buffering: discard whatever the client is still sending so it can
-        // read the 413, but drop the socket after a short grace period regardless.
-        req.resume();
-        const drop = setTimeout(() => req.destroy(), 2000);
-        drop.unref();
-        req.once("close", () => clearTimeout(drop));
+        rejectTooLarge(req, res, maxBodyBytes);
         return;
       }
     }
@@ -222,6 +215,49 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     opts.tls ? "HTTPS+SSE bridge listening (TLS)" : "HTTP+SSE bridge listening (plain HTTP, no TLS)",
   );
   return httpServer;
+}
+
+/** Extra bytes / time we'll discard after a 413 before giving up on the client. */
+const DRAIN_MAX_BYTES = 16 * 1024 * 1024;
+const DRAIN_MAX_MS = 5000;
+
+/**
+ * Send 413 without the client hitting EPIPE/ECONNRESET. Node destroys the
+ * socket as soon as a `Connection: close` response is flushed, so answering
+ * while the client is still uploading resets the connection before it reads
+ * the status. Instead: discard (never buffer) the rest of the body, and send
+ * the 413 once it has fully arrived. A slow/huge upload is bounded by
+ * DRAIN_MAX_BYTES / DRAIN_MAX_MS — past either, we send the 413 anyway and
+ * drop the socket once it's flushed.
+ */
+function rejectTooLarge(req: http.IncomingMessage, res: http.ServerResponse, maxBytes: number): void {
+  let drained = 0;
+  let done = false;
+  const respond = (abort: boolean) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    req.off("data", onData);
+    if (!res.headersSent && !res.destroyed) {
+      res.writeHead(413, { "content-type": "application/json", connection: "close" });
+      res.end(JSON.stringify({ error: "payload_too_large", maxBytes }));
+    }
+    if (abort) {
+      if (res.writableFinished) req.destroy();
+      else res.once("finish", () => req.destroy());
+    }
+  };
+  const onData = (chunk: Buffer) => {
+    drained += chunk.length;
+    if (drained > DRAIN_MAX_BYTES) respond(true);
+  };
+  const timer = setTimeout(() => respond(true), DRAIN_MAX_MS);
+  timer.unref();
+  if (req.readableEnded) return respond(false);
+  req.on("data", onData);
+  req.once("end", () => respond(false));
+  req.once("close", () => respond(true));
+  req.resume();
 }
 
 function sha256(s: string): Buffer {
