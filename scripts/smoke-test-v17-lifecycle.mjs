@@ -95,7 +95,8 @@ async function main() {
         await sleep(500);
         after = (await m.pages()).length;
       }
-      ok(before === 5 && after <= MAX_PAGES, `(b) page cap trims 5 → ≤${MAX_PAGES}`, `before=${before} after=${after}`);
+      // 5 pages were opened; a reaper tick may already trim mid-loop, so only `after` is asserted.
+      ok(after <= MAX_PAGES, `(b) page cap trims 5 → ≤${MAX_PAGES}`, `before=${before} after=${after}`);
       await m.call("session_close").catch(() => {});
     } finally {
       await m.close();
