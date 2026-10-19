@@ -122,6 +122,7 @@ import type { RegistryStore } from "./storage/registry.js";
 import type { Broadcaster } from "./live/broadcaster.js";
 import type { SubscriptionRegistry } from "./live/subscriptions.js";
 import { buildUri, parseUri } from "./live/uri.js";
+import { ScreencastManager } from "./screencast.js";
 
 /**
  * Per-connection context handed to `dispatch()`. Lets subscribe/unsubscribe
@@ -223,6 +224,7 @@ declare const indexedDB: any;
 
 export class RpcDispatcher {
   private readonly sessions: SessionRegistry;
+  private readonly screencast: ScreencastManager;
   private readonly startedAt = Date.now();
   /** Set while Chrome is being relaunched in-process; gates browser-touching RPCs. */
   private relaunching: Promise<void> | null = null;
@@ -237,9 +239,27 @@ export class RpcDispatcher {
     private readonly registry?: RegistryStore,
   ) {
     this.sessions = new SessionRegistry(browser, broadcaster, registry);
+    this.screencast = new ScreencastManager(broadcaster);
+    // The CDP screencast runs only while its resource URI has subscribers.
+    subscriptions.setUriHooks({
+      onFirst: (uri) => {
+        const parsed = parseUri(uri);
+        if (parsed?.kind !== "page.screencast") return;
+        const sp = this.sessions.sessions.get(parsed.sessionId)?.pages.get(parsed.pageId);
+        if (!sp) {
+          log.debug({ uri }, "screencast subscribe for unknown page; not started");
+          return;
+        }
+        void this.screencast.start(uri, sp.page, sp.pageId);
+      },
+      onLast: (uri) => {
+        if (parseUri(uri)?.kind === "page.screencast") void this.screencast.stop(uri);
+      },
+    });
   }
 
   async closeAll(): Promise<void> {
+    await this.screencast.dispose();
     await this.sessions.closeAll();
   }
 
@@ -1199,12 +1219,18 @@ export class RpcDispatcher {
             mimeType: "application/json",
           });
         }
+        resources.push({
+          uri: buildUri({ kind: "page.screencast", sessionId: session.id, pageId }),
+          name: `screencast [${session.id}/${pageId}]`,
+          description: "Latest JPEG frame (~2fps, pushed as resources/updated while subscribed)",
+          mimeType: "image/jpeg",
+        });
       }
     }
     return { resources };
   }
 
-  private resourcesRead(params: ResourcesReadParams): ResourcesReadResult {
+  private async resourcesRead(params: ResourcesReadParams): Promise<ResourcesReadResult> {
     if (!params?.uri) throw DaemonError.invalidParams("uri is required");
     const parsed = parseUri(params.uri);
     if (!parsed) throw DaemonError.invalidParams(`invalid resource URI: ${params.uri}`);
@@ -1258,6 +1284,23 @@ export class RpcDispatcher {
       case "session.intercept": {
         const s = this.sessions.get(parsed.sessionId);
         data = { rules: s.intercept.list() };
+        break;
+      }
+      case "page.screencast": {
+        // Latest live frame while subscribed; otherwise (or before the first
+        // frame arrives) capture one on demand so a read never comes back empty.
+        const sp = this.sessions.getPage(parsed.sessionId, parsed.pageId);
+        const frame = this.screencast.latest(params.uri);
+        if (frame) {
+          data = { mimeType: "image/jpeg", blob: frame.data, ts: frame.ts, source: "screencast" };
+        } else {
+          const blob = (await sp.page.screenshot({
+            type: "jpeg",
+            quality: 60,
+            encoding: "base64",
+          })) as string;
+          data = { mimeType: "image/jpeg", blob, ts: Date.now(), source: "capture" };
+        }
         break;
       }
       case "docs.tools":

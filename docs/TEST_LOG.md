@@ -243,3 +243,20 @@ Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Sum
 `LC_CONTAINER=lc-test-e node scripts/test-all-tools.mjs` (after the relaunch) — Summary: **58/58 PASS**
 `docker stop lc-test-e` → exit=0, "daemon stopped" in `/var/log/lean-chronoscope/lean-chronoscope.log`
 
+## 2026-10-19 — Screencast resource (test container `lc-test-f`, :18806)
+
+`pnpm typecheck && pnpm build` — clean.
+
+`LC_CONTAINER=lc-test-f node scripts/smoke-test-v17-screencast.mjs` — **PASS**:
+- resources/list includes `…/page/p_1/screencast`, mimeType=image/jpeg ............ PASS
+- read before subscribe → on-demand capture, image/jpeg, `/9j/` magic ............ PASS
+- subscribe → 2 updates in 810ms; daemon logged "screencast started" ............. PASS
+- read while subscribed → base64 JPEG blob (4632 b64 chars), no text field ...... PASS
+- rate ~1.67 updates/s over 3s ................................................... PASS
+- unsubscribe → 0 updates over 3s; daemon logged "screencast stopped" ............ PASS
+- page_close while subscribed → ok, "screencast stopped", read → -32003 Page not found, unsubscribe ok, daemon healthy ... PASS
+- no warn/error lines in the daemon log ......................................... PASS
+
+`LC_CONTAINER=lc-test-f node scripts/smoke-test-m2-mcp.mjs` — 0 ✗ (LC_CONTAINER support added)
+
+`LC_CONTAINER=lc-test-f node scripts/test-all-tools.mjs` — Summary: **58/58 PASS**

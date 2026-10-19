@@ -56,6 +56,13 @@ export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
     }
 
     const result = await daemon.call<ResourcesReadResult>("resources.read", { uri });
+    // Binary resources (screencast frames) come back as base64 — pass through as a blob.
+    const img = result.data as { mimeType?: string; blob?: string } | null;
+    if (parseUri(result.uri)?.kind === "page.screencast" && typeof img?.blob === "string") {
+      return {
+        contents: [{ uri: result.uri, mimeType: img.mimeType ?? "image/jpeg", blob: img.blob }],
+      };
+    }
     return {
       contents: [
         {
@@ -98,7 +105,7 @@ export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
       .sendResourceUpdated({ uri })
       .catch((err) => log.warn({ err, uri }, "sendResourceUpdated failed"));
     // Updates on `browser://sessions` or any `browser://session/{sid}/pages`
-    // also change which resource URIs exist (each page adds 5 page-scoped URIs).
+    // also change which resource URIs exist (each page adds 6 page-scoped URIs).
     // Spec requires us to tell the client to re-list when that happens.
     if (uri === "browser://sessions" || /^browser:\/\/session\/[^/]+\/pages$/.test(uri)) {
       server

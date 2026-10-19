@@ -272,6 +272,7 @@ URI scheme: `browser://`. ה-mcp-server מצהיר עליהם, subscriptions ע�
 | `browser://session/{sid}/page/{pid}/network/live` | request completed (debounced) |
 | `browser://session/{sid}/page/{pid}/url` | `Page.frameNavigated` |
 | `browser://session/{sid}/page/{pid}/exceptions/live` | `Runtime.exceptionThrown` |
+| `browser://session/{sid}/page/{pid}/screencast` | new JPEG frame, ~2fps (`Page.startScreencast`, runs only while subscribed; `image/jpeg` blob) |
 | `browser://session/{sid}/intercept/rules` | rule add/remove |
 | `browser://docs/tools` | static (auto-generated from schemas) |
 
