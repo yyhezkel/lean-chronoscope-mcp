@@ -62,12 +62,14 @@ const SECRET_KEY_SRC =
  * generic names are safe to match there: bare `token`, OAuth `code`, Google
  * `?key=AIza…`, signed-URL `sig`/`signature`, AWS SigV4 presign params
  * (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`), GCS V4
- * (`X-Goog-Signature`, `X-Goog-Credential`), and session ids. Deliberately NOT
+ * (`X-Goog-Signature`, `X-Goog-Credential`), and session ids (`session`,
+ * `session_id`, Java `jsessionid`, PHP `PHPSESSID`, bare `sid` — exact names
+ * only, so `foosid=` is untouched). Deliberately NOT
  * added to the body patterns — there they would cause false positives.
  * Matching is case-insensitive.
  */
 const URL_ONLY_KEY_SRC =
-  "token|code|key|sig|signature|auth|session|session_?id|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential";
+  "token|code|key|sig|signature|auth|session|session_?id|jsessionid|phpsessid|sid|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential";
 
 const URL_KEY_SRC = `${SECRET_KEY_SRC}|${URL_ONLY_KEY_SRC}`;
 

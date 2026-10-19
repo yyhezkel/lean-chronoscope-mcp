@@ -224,6 +224,30 @@ function sleep(ms: number): Promise<void> {
 // (which TS sees as Node code). Declare it ambiently so those closures compile.
 declare const indexedDB: any;
 
+const DEFAULT_LOCKED_OP_TIMEOUT_MS = 60_000;
+let lockedOpTimeoutCache: number | undefined;
+
+/**
+ * `LOCKED_OP_TIMEOUT_MS`, validated once per process. A typo (`6O0`) must not
+ * fail open into "no timeout" (`Number("6O0")` is NaN): log it once and use the
+ * default. `0` explicitly disables the bound.
+ */
+function lockedOpTimeoutMs(): number {
+  if (lockedOpTimeoutCache !== undefined) return lockedOpTimeoutCache;
+  const raw = env("LOCKED_OP_TIMEOUT_MS");
+  let v = DEFAULT_LOCKED_OP_TIMEOUT_MS;
+  if (raw !== undefined && raw.trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) v = n;
+    else
+      log.error(
+        { name: "LEAN_CHRONOSCOPE_LOCKED_OP_TIMEOUT_MS", value: raw, using: v },
+        "invalid numeric env — using default",
+      );
+  }
+  return (lockedOpTimeoutCache = v);
+}
+
 export class RpcDispatcher {
   private readonly sessions: SessionRegistry;
   private readonly screencast: ScreencastManager;
@@ -335,30 +359,51 @@ export class RpcDispatcher {
    * in the background until it settles, the page navigates, or the page is
    * closed (`page.close` is unlocked for exactly this reason). Ops with their
    * own `timeoutMs` (navigate) get that plus a 5s margin if it is longer.
+   *
+   * `onAbandon` is called synchronously at expiry with the still-running op, so
+   * the caller can keep its in-flight guards held until the op really settles
+   * (otherwise the page reaper could close a page an abandoned op still drives).
+   * The late settle/reject is logged instead of swallowed.
    */
-  private async withOpTimeout<T>(method: string, params: unknown, fn: () => Promise<T>): Promise<T> {
-    const base = Number(env("LOCKED_OP_TIMEOUT_MS") ?? 60_000);
+  private async withOpTimeout<T>(
+    method: string,
+    params: unknown,
+    fn: () => Promise<T>,
+    onAbandon: (op: Promise<unknown>) => void,
+  ): Promise<T> {
+    const base = lockedOpTimeoutMs();
     if (!(base > 0)) return fn();
     const own = Number((params as { timeoutMs?: unknown } | undefined)?.timeoutMs);
     const limitMs = Number.isFinite(own) && own + 5_000 > base ? own + 5_000 : base;
     let timer: NodeJS.Timeout | undefined;
+    const startedAt = Date.now();
     const op = fn();
     op.catch(() => {}); // a late rejection after timeout must not go unhandled
     try {
       return await Promise.race([
         op,
         new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () =>
-              reject(
-                new DaemonError(
-                  ErrorCode.TIMEOUT,
-                  `${method} did not finish within ${limitMs / 1000}s and was abandoned ` +
-                    `(a never-settling promise or an open JS dialog?) — page_close the page if it stays stuck`,
+          timer = setTimeout(() => {
+            const p = params as { sessionId?: string; pageId?: string } | undefined;
+            const meta = { method, sessionId: p?.sessionId, pageId: p?.pageId, limitMs };
+            log.warn(meta, "locked op timed out — releasing lock, op abandoned");
+            const settled = op.then(
+              () => log.info({ ...meta, ms: Date.now() - startedAt }, "abandoned op settled"),
+              (err) =>
+                log.warn(
+                  { ...meta, ms: Date.now() - startedAt, err: (err as Error)?.message ?? String(err) },
+                  "abandoned op settled (rejected)",
                 ),
+            );
+            onAbandon(settled);
+            reject(
+              new DaemonError(
+                ErrorCode.TIMEOUT,
+                `${method} did not finish within ${limitMs / 1000}s and was abandoned ` +
+                  `(a never-settling promise or an open JS dialog?) — page_close the page if it stays stuck`,
               ),
-            limitMs,
-          );
+            );
+          }, limitMs);
         }),
       ]);
     } finally {
@@ -399,19 +444,38 @@ export class RpcDispatcher {
       sess.inFlight++;
     }
     if (page) page.inFlight++;
+    // Exactly-once release of the in-flight guards. Normally at the end of this
+    // RPC; for an op abandoned by withOpTimeout, only once it actually settles —
+    // the lock is released at expiry, but the page/session stay guarded from the
+    // reaper while puppeteer still drives them.
+    let released = false;
+    let deferred = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      if (sess) sess.inFlight--;
+      if (page) page.inFlight--;
+    };
     try {
       if (sess && locked) {
         return await sess.lock.run(async () => {
           // A Chrome crash while this RPC sat queued behind the lock: the gate
           // above was checked before queueing, so check again now.
           if (this.relaunching) await this.awaitRelaunch();
-          return this.withOpTimeout(method, params, () => this.dispatchInner(method, params, ctx));
+          return this.withOpTimeout(
+            method,
+            params,
+            () => this.dispatchInner(method, params, ctx),
+            (op) => {
+              deferred = true;
+              void op.finally(release);
+            },
+          );
         });
       }
       return await this.dispatchInner(method, params, ctx);
     } finally {
-      if (sess) sess.inFlight--;
-      if (page) page.inFlight--;
+      if (!deferred) release();
     }
   }
 

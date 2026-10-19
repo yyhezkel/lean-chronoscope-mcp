@@ -198,6 +198,11 @@ export class SessionRegistry {
 
   async newPage(sessionId: string, url?: string, background = false): Promise<PageState> {
     const session = this.get(sessionId);
+    // Selection at start: a page.new abandoned by the locked-op timeout can
+    // finish late, after the client already page_select-ed another page — it
+    // must not steal the selection back. (Closing the old selection doesn't
+    // count as an explicit choice, so the new page still takes over then.)
+    const selectedBefore = session.selectedPageId;
     const page = await session.context.newPage();
     const pageId = nextPageId();
     const targetId = (page.target() as any)?._targetId ?? page.target().url();
@@ -218,7 +223,10 @@ export class SessionRegistry {
 
     await this.attachCollectorsAndNavTracking(session, state);
     session.pages.set(pageId, state);
-    if (!background || session.selectedPageId == null) {
+    const reselected =
+      session.selectedPageId !== selectedBefore &&
+      (selectedBefore == null || session.pages.has(selectedBefore));
+    if (session.selectedPageId == null || (!background && !reselected)) {
       session.selectedPageId = pageId;
     }
     if (url) {

@@ -302,3 +302,14 @@ Container: `LC_CONTAINER=lc-r1 LC_TEST_PORT=18811 scripts/test-container.sh -e L
 - invalid env (`HTTP_RATE_PER_MIN=6O0`, `HTTP_MAX_SESSIONS=-1`) → error logged, defaults 60 / 64 used
 - smoke-test-v17-screencast (stdio) ............................. PASS
 - test-all-tools ................................................ 58/58 PASS
+## 2026-10-19 — review2/S2-core (abandoned-op inFlight guard, op-timeout env validation, jsessionid/PHPSESSID/sid redaction)
+
+Container: `LC_CONTAINER=lc-s2 LC_TEST_PORT=18822 scripts/test-container.sh -e LEAN_CHRONOSCOPE_PAGE_IDLE_MS=6000 -e LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS=2000 -e LEAN_CHRONOSCOPE_MAX_PAGES_PER_SESSION=3 -e LEAN_CHRONOSCOPE_LOCKED_OP_TIMEOUT_MS=8000`
+
+- pnpm typecheck && pnpm test (redact 26/26) && pnpm build ....... PASS
+- smoke-test-v17-lifecycle (OP_TIMEOUT_MS=8000) — 18/18, ALL PASS
+  (new (g): evaluate on a non-selected page → TIMEOUT 8007ms; page NOT reaped after 12.3s idle
+  (PAGE_IDLE_MS 6s) while the abandoned op is pending; page_close → "abandoned op settled" ms=12273 logged)
+- env typo `LOCKED_OP_TIMEOUT_MS=6O0` → `invalid numeric env — using default` (using 60000) logged; navigate OK
+- default container: test-all-tools .............................. 58/58 PASS
+- default container: smoke-test-v17-relaunch ..................... ALL PASS
