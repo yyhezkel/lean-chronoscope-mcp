@@ -6,7 +6,7 @@ Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
 
 - **Screencast resource** (planned M5.2, cut). `Page.startScreencast` → 2fps JPEG frames exposed as `browser://session/{sid}/page/{pid}/screencast`, with `resources/updated` carrying the latest frame's blob sha. Stop the CDP screencast when no subscribers remain.
 - ~~**`session_attach`** (title-based reattach).~~ **Resolved (v1.4.0).** The `session_attach` tool now points a connection at an existing session by id or by human **title** (attach-or-create when a title matches nothing), rehydrating a closed session's captured history from disk. The HTTP bridge also honors an `x-lc-session: <id>` reconnect header to return to the same session. Untrusted ids are validated by `assertSafeSessionId()` (no `/`, `\`, `..`, NUL, empty, >200 chars) to block path traversal.
-- **HTTP-bridge TLS + rate limiting.** `src/mcp/http-bridge.ts` has bearer-token auth and binds loopback only; it has no built-in TLS and no rate limiting. Intended for SSH/Wireguard or behind an nginx TLS proxy. Add TLS termination options if it's ever exposed directly.
+- ~~**HTTP-bridge TLS + rate limiting.**~~ **Resolved (v1.7.0).** `src/mcp/http-bridge.ts` now does a constant-time bearer compare, caps POST bodies (`HTTP_MAX_BODY_BYTES`, 4 MiB → 413), rate-limits per client IP with a bounded token-bucket map (`HTTP_RATE_PER_MIN`, 600 → 429 + `Retry-After`, failed auth counted), caps concurrent MCP transports (`HTTP_MAX_SESSIONS`, 64 → 503), and serves HTTPS when both `HTTP_TLS_CERT` and `HTTP_TLS_KEY` are set (only one → bridge refuses to start). Smoke: `scripts/smoke-test-http-bridge.mjs`.
 - **In-place Chrome relaunch.** On Chrome disconnect the daemon exits and Docker's restart policy reboots it (sessions' browser state is lost, SQLite survives). A nicer recovery would relaunch Chrome in-process and re-create `BrowserContext`s + collectors + intercept engines without dropping the daemon.
 
 ## Security / correctness
@@ -49,7 +49,7 @@ If your client shares the host's network (stdio `docker exec`, or loopback HTTP)
 
 ## Cosmetic / ergonomics
 
-- **`session_new` can't create a *different* session id** from an existing MCP connection — the session id is fixed per stdio connection by design. The tool only ensures/instantiates the connection's own session. Creating arbitrary sessions would need the daemon `session.ensure` exposed with an explicit id (intentionally not done, to avoid cross-session confusion from a single client).
+- ~~**`session_new` can't create a *different* session id**~~ **Resolved (v1.4.0).** `session_new` still only opens a page in the connection's own session (its description now says so), but `session_attach` (v1.4.0) covers switching to — or creating — a session by id or title, with untrusted ids validated by `assertSafeSessionId()`.
 - **Benign "intercept client detach failed" warning** logged on every page close. `InterceptionEngine.detach` awaits `client.detach()` inside a try/catch; when the page is already closed it logs a warning. Harmless (caught), but noisy — could check page-closed state first and skip the detach.
 
 ## Notes
