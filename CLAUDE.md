@@ -44,7 +44,12 @@ curl -s http://127.0.0.1:8780/health   # {"ok":true,...} (no auth)
 Tools surface as `mcp__lean-chronoscope__*` after a session restart. The bridge mints
 a fresh browser session per HTTP MCP session (recorded with `source='http'`), and
 its `transport.onclose` now closes that daemon session so BrowserContexts/SQLite
-don't leak on client disconnect.
+don't leak on client disconnect. Each HTTP MCP session also gets its **own daemon
+socket connection** (opened at initialize, closed with the transport — or right
+away if the first request never initializes): daemon-side resource subscriptions
+are keyed per connection, so one client's unsubscribe can't end another's stream,
+and a disconnect releases its subscriptions (stopping a CDP screencast nobody else
+watches).
 
 **Session persistence on reconnect:** the bridge honors a client-supplied
 `x-lc-session: <id>` request header — reconnecting with the same header returns
@@ -55,9 +60,13 @@ before. Session ids from untrusted callers (this header, and `session_attach`'s
 which rejects ids containing `/`, `\`, `..`, NUL, or that are empty / >200 chars —
 an id becomes a filesystem path, so this prevents traversal out of the sessions dir.
 
-Bridge hardening: constant-time bearer compare, 4 MiB body cap (413), per-IP
-rate limit (429, counts failed auth), concurrent-session cap (503), and optional
-built-in TLS — see the tunables table below. Smoke: `scripts/smoke-test-http-bridge.mjs`.
+Bridge hardening: constant-time bearer compare, 4 MiB body cap (413), rate limits
+in separate token buckets (429) — failed auth per client IP, authenticated requests
+per MCP session, session-less (initialize) requests per IP — so parallel agents
+behind docker-proxy's shared gateway IP don't starve each other and a bad-token
+flood can't lock out live sessions; concurrent-session cap (503), and optional
+built-in TLS — see the tunables table below. Invalid numeric limits (typos, NaN,
+negative) log an error and fall back to the default (fail closed). Smoke: `scripts/smoke-test-http-bridge.mjs`.
 
 The bearer token lives in
 `docker/docker-compose.yml` (`LEAN_CHRONOSCOPE_HTTP_TOKEN`, legacy
@@ -200,7 +209,9 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
 | `LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | HTTP bridge POST body cap; larger → 413 |
-| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `600` | per-client-IP token bucket (burst = rate) on non-`/health` requests, incl. failed auth → 429 + `Retry-After`; `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `60` | failed-auth attempts per client IP (token bucket, burst = rate) → 429 + `Retry-After`; once exhausted, requests without a live `mcp-session-id` are refused before the token compare; `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_SESSION_RATE_PER_MIN` | `600` | authenticated requests per MCP session (`mcp-session-id`) → 429; DELETE exempt; `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_INIT_RATE_PER_MIN` | `120` | authenticated requests with no live session (initialize) per client IP → 429; `0` disables |
 | `LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS` | `64` | max concurrent HTTP MCP transports; new sessions beyond → 503; `0` = unlimited |
 | `LEAN_CHRONOSCOPE_HTTP_TLS_CERT` / `_TLS_KEY` | (unset) | PEM file paths; both set → bridge serves HTTPS; only one set → bridge refuses to start (fail closed) |
 | `LEAN_CHRONOSCOPE_DATA_DIR` | `/var/lib/lean-chronoscope` | data root (sessions + `registry.sqlite`) |

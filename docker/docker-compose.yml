@@ -54,10 +54,13 @@ services:
       # - LEAN_CHRONOSCOPE_IDLE_MS=1800000
       # - LEAN_CHRONOSCOPE_SIZE_CAP_BYTES=524288000
       # - LEAN_CHRONOSCOPE_RETENTION_DAYS=7
-      # Optional HTTP-bridge hardening knobs (defaults shown). RATE_PER_MIN is a
-      # per-client-IP token bucket (0 disables); MAX_SESSIONS 0 = unlimited.
+      # Optional HTTP-bridge hardening knobs (defaults shown). RATE_PER_MIN =
+      # failed auth per client IP, SESSION_RATE = per MCP session, INIT_RATE =
+      # initialize per IP (0 disables each); MAX_SESSIONS 0 = unlimited.
       # - LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES=4194304
-      # - LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN=600
+      # - LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN=60
+      # - LEAN_CHRONOSCOPE_HTTP_SESSION_RATE_PER_MIN=600
+      # - LEAN_CHRONOSCOPE_HTTP_INIT_RATE_PER_MIN=120
       # - LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS=64
       # Optional built-in TLS: set BOTH (PEM paths inside the container, e.g. a
       # `- ./tls:/tls:ro` volume). Only one set → the bridge refuses to start.

@@ -26,13 +26,22 @@ export interface HttpBridgeOptions {
   bearerToken: string;
   /** Function that hands out a fresh `sessionId` per HTTP MCP session. */
   sessionId: () => string;
-  daemon: DaemonClient;
+  /**
+   * Opens a dedicated daemon connection. Called once per HTTP MCP session and
+   * closed with it: daemon-side resource subscriptions (incl. the CDP
+   * screencast) are keyed per connection and released when it closes.
+   */
+  connectDaemon: () => Promise<DaemonClient>;
   /** Tool surface to advertise. Defaults to "full". */
   mode?: ToolMode;
   /** Max POST body size in bytes; larger bodies get 413. Defaults to 4 MiB. */
   maxBodyBytes?: number;
-  /** Per-client-IP requests/minute (token bucket, burst = this). 0 disables. Defaults to 600. */
+  /** Failed-auth attempts/minute per client IP (token bucket, burst = this). 0 disables. Defaults to 60. */
   ratePerMin?: number;
+  /** Authenticated requests/minute per MCP session (`mcp-session-id`). 0 disables. Defaults to 600. */
+  sessionRatePerMin?: number;
+  /** Authenticated requests/minute per client IP that carry no live session (initialize). 0 disables. Defaults to 120. */
+  initRatePerMin?: number;
   /** Max concurrent MCP transports; new sessions beyond it get 503. 0 = unlimited. Defaults to 64. */
   maxSessions?: number;
   /** PEM cert + key. When set, the bridge serves HTTPS instead of plain HTTP. */
@@ -40,7 +49,9 @@ export interface HttpBridgeOptions {
 }
 
 const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
-const DEFAULT_RATE_PER_MIN = 600;
+const DEFAULT_RATE_PER_MIN = 60;
+const DEFAULT_SESSION_RATE_PER_MIN = 600;
+const DEFAULT_INIT_RATE_PER_MIN = 120;
 const DEFAULT_MAX_SESSIONS = 64;
 /** Upper bound on tracked client IPs; stale (fully refilled) buckets are evicted first. */
 const MAX_RATE_BUCKETS = 10_000;
@@ -55,8 +66,12 @@ class BodyTooLargeError extends Error {}
  *
  * Bind to 127.0.0.1 unless TLS is on (`opts.tls`) or a TLS-terminating proxy
  * is in front. Hardening: constant-time bearer compare, a POST body cap (413),
- * a per-client-IP token-bucket rate limit (429, failed auth attempts count too),
- * and a cap on concurrent MCP transports (503 for new sessions beyond it).
+ * token-bucket rate limits (429) in three separate buckets — failed auth per
+ * client IP, authenticated requests per MCP session, and session-less
+ * (initialize) requests per client IP — and a cap on concurrent MCP transports
+ * (503 for new sessions beyond it). Behind docker-proxy every host client
+ * shares the gateway IP, so per-session buckets keep parallel agents from
+ * starving each other, and a bad-token flood can't lock out live sessions.
  */
 export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Server> {
   const sessionTransports = new Map<string, StreamableHTTPServerTransport>();
@@ -65,7 +80,9 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
   const sessionRefs = new Map<string, number>();
   const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
-  const limiter = new RateLimiter(opts.ratePerMin ?? DEFAULT_RATE_PER_MIN);
+  const authFailLimiter = new RateLimiter(opts.ratePerMin ?? DEFAULT_RATE_PER_MIN);
+  const sessionLimiter = new RateLimiter(opts.sessionRatePerMin ?? DEFAULT_SESSION_RATE_PER_MIN);
+  const initLimiter = new RateLimiter(opts.initRatePerMin ?? DEFAULT_INIT_RATE_PER_MIN);
   const expectedAuth = sha256(`Bearer ${opts.bearerToken}`);
   // Transports being built but not yet initialized — counted against maxSessions
   // so a burst of parallel initializes can't overshoot the cap.
@@ -78,18 +95,24 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       res.end(JSON.stringify({ ok: true, sessions: sessionTransports.size }));
       return;
     }
-    // Rate limit before auth so token brute force is throttled too. Keyed on
-    // the socket peer — behind a reverse proxy every client shares one bucket.
-    const retryAfter = limiter.take(req.socket.remoteAddress ?? "unknown");
-    if (retryAfter > 0) {
-      res.writeHead(429, { "content-type": "application/json", "retry-after": String(retryAfter) });
-      res.end(JSON.stringify({ error: "rate_limited" }));
-      return;
+    // Keyed on the socket peer; X-Forwarded-For is client-controlled and ignored.
+    const ip = req.socket.remoteAddress ?? "unknown";
+    const sid = (req.headers["mcp-session-id"] as string | undefined) ?? undefined;
+    const live = !!sid && sessionTransports.has(sid);
+    // Once an IP has used up its failed-auth allowance, refuse before comparing
+    // the token, so brute force stays throttled. Requests on a live session skip
+    // this pre-check: the session id is an unguessable UUID only handed to an
+    // authenticated client, so a bad-token flood from a shared (docker-proxy)
+    // IP can't lock out clients that are already connected.
+    if (!live) {
+      const retryAfter = authFailLimiter.peek(ip);
+      if (retryAfter > 0) return rateLimited(res, retryAfter);
     }
     // Authenticate. Compare fixed-length digests in constant time, so neither
     // the token's contents nor its length leak through timing.
     const auth = req.headers["authorization"];
     if (!auth || !timingSafeEqual(sha256(auth), expectedAuth)) {
+      authFailLimiter.take(ip);
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "unauthorized" }));
       return;
@@ -98,6 +121,14 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       res.writeHead(404).end();
       return;
     }
+    // Authenticated: one bucket per MCP session, so parallel agents behind the
+    // same IP don't share an allowance; session-less requests (initialize, or a
+    // stale session id) draw from a separate per-IP bucket. DELETE on a live
+    // session is exempt — a throttled client must still be able to let go.
+    const retryAfter = live
+      ? req.method === "DELETE" ? 0 : sessionLimiter.take(sid!)
+      : initLimiter.take(ip);
+    if (retryAfter > 0) return rateLimited(res, retryAfter);
 
     // Body parsing — SDK accepts pre-parsed JSON or raw stream. Read it before
     // touching transports so an oversized body never allocates a session.
@@ -113,9 +144,8 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       }
     }
 
-    // Reuse the transport for the session declared in the header, or create
-    // a new one on the first request.
-    const sid = (req.headers["mcp-session-id"] as string | undefined) ?? undefined;
+    // Reuse the transport for the session declared in the header (re-looked up:
+    // it may have closed while the body was read), or create a new one.
     let transport = sid ? sessionTransports.get(sid) : undefined;
 
     if (!transport && maxSessions > 0 && sessionTransports.size + creating >= maxSessions) {
@@ -126,6 +156,10 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
     }
 
     let isNew = false;
+    // Set when this request created the transport; run after handleRequest so a
+    // transport whose first request never initialized doesn't leak its daemon
+    // connection.
+    let abandonIfUninitialized: (() => void) | undefined;
     if (!transport) {
       isNew = true;
       creating++;
@@ -134,42 +168,70 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       // Absent the header, mint a fresh random id as before.
       const pinned = (req.headers["x-lc-session"] as string | undefined)?.trim();
       const browserMcpSession = pinned && pinned.length > 0 ? pinned : opts.sessionId();
+      let initialized = false;
+      let daemon: DaemonClient | undefined;
+      let server: Server | undefined;
+      let dispose = (): void => {};
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSid) => {
+          initialized = true;
           sessionTransports.set(newSid, transport!);
           if (isNew) { isNew = false; creating--; }
           sessionRefs.set(browserMcpSession, (sessionRefs.get(browserMcpSession) ?? 0) + 1);
           log.info({ sid: newSid, browserMcpSession }, "HTTP MCP session initialized");
         },
       });
-      let server: Server;
-      try {
-        server = await buildServer(opts.daemon, browserMcpSession, opts.mode ?? "full");
-        await server.connect(transport);
-      } catch (err) {
-        if (isNew) { isNew = false; creating--; }
-        throw err;
-      }
+      // Set before server.connect() so the SDK chains its own onclose after ours.
       transport.onclose = () => {
         const closeSid = transport!.sessionId;
         if (!closeSid || !sessionTransports.delete(closeSid)) return; // never initialized / already closed
+        sessionLimiter.delete(closeSid);
+        dispose();
+        const client = daemon!;
         const refs = (sessionRefs.get(browserMcpSession) ?? 1) - 1;
+        let closing: Promise<unknown> = Promise.resolve();
         if (refs > 0) {
           sessionRefs.set(browserMcpSession, refs);
           log.info({ sid: closeSid, browserMcpSession, refs }, "HTTP MCP session closed (daemon session still shared)");
-          return;
+        } else {
+          sessionRefs.delete(browserMcpSession);
+          // Close the daemon-side browser session too, otherwise the BrowserContext
+          // + SQLite + on-disk dir leak until daemon restart or the age sweep.
+          // closeSession is idempotent, so racing the reaper is harmless.
+          closing = client
+            .call("session.close", { sessionId: browserMcpSession })
+            .catch((err) =>
+              log.warn({ err, browserMcpSession }, "session.close on transport close failed"),
+            );
+          log.info({ sid: closeSid, browserMcpSession }, "HTTP MCP session closed");
         }
-        sessionRefs.delete(browserMcpSession);
-        // Close the daemon-side browser session too, otherwise the BrowserContext
-        // + SQLite + on-disk dir leak until daemon restart or the age sweep.
-        // closeSession is idempotent, so racing the reaper is harmless.
-        void opts.daemon
-          .call("session.close", { sessionId: browserMcpSession })
-          .catch((err) =>
-            log.warn({ err, browserMcpSession }, "session.close on transport close failed"),
-          );
-        log.info({ sid: closeSid, browserMcpSession }, "HTTP MCP session closed");
+        // Drop the dedicated connection once session.close is answered; the
+        // daemon then releases every subscription it held (stopping screencasts
+        // nobody else watches).
+        void closing.finally(() => client.close());
+      };
+      try {
+        daemon = await opts.connectDaemon();
+        ({ server, dispose } = await buildServer(daemon, browserMcpSession, opts.mode ?? "full"));
+        await server.connect(transport);
+      } catch (err) {
+        if (isNew) { isNew = false; creating--; }
+        dispose();
+        daemon?.close();
+        throw err;
+      }
+      abandonIfUninitialized = () => {
+        if (initialized) return;
+        dispose();
+        void server!.close().catch(() => {});
+        // A fresh random id is known to nobody else — close the session that
+        // buildServer ensured. A pinned id may be shared, so leave it to the reaper.
+        const client = daemon!;
+        const closing = pinned
+          ? Promise.resolve()
+          : client.call("session.close", { sessionId: browserMcpSession }).catch(() => {});
+        void closing.finally(() => client.close());
       };
     }
 
@@ -183,8 +245,9 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       }
     } finally {
       // A request that didn't initialize (e.g. a bad first message) no longer
-      // holds a pending slot.
+      // holds a pending slot, and its transport is unreachable — release it.
       if (isNew) { isNew = false; creating--; }
+      abandonIfUninitialized?.();
     }
   };
 
@@ -210,6 +273,8 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       tls: !!opts.tls,
       maxBodyBytes,
       ratePerMin: opts.ratePerMin ?? DEFAULT_RATE_PER_MIN,
+      sessionRatePerMin: opts.sessionRatePerMin ?? DEFAULT_SESSION_RATE_PER_MIN,
+      initRatePerMin: opts.initRatePerMin ?? DEFAULT_INIT_RATE_PER_MIN,
       maxSessions,
     },
     opts.tls ? "HTTPS+SSE bridge listening (TLS)" : "HTTP+SSE bridge listening (plain HTTP, no TLS)",
@@ -260,6 +325,11 @@ function rejectTooLarge(req: http.IncomingMessage, res: http.ServerResponse, max
   req.resume();
 }
 
+function rateLimited(res: http.ServerResponse, retryAfter: number): void {
+  res.writeHead(429, { "content-type": "application/json", "retry-after": String(retryAfter) });
+  res.end(JSON.stringify({ error: "rate_limited" }));
+}
+
 function sha256(s: string): Buffer {
   return createHash("sha256").update(s, "utf8").digest();
 }
@@ -267,7 +337,8 @@ function sha256(s: string): Buffer {
 /**
  * Per-key token bucket: capacity `perMin` (the burst), refilled continuously at
  * `perMin / 60` tokens/sec. `take()` returns 0 when allowed, else the
- * Retry-After in whole seconds. The map is bounded by MAX_RATE_BUCKETS.
+ * Retry-After in whole seconds; `peek()` answers the same without consuming.
+ * The map is bounded by MAX_RATE_BUCKETS.
  */
 class RateLimiter {
   private readonly buckets = new Map<string, { tokens: number; at: number }>();
@@ -278,18 +349,31 @@ class RateLimiter {
   }
 
   take(key: string, now = Date.now()): number {
+    return this.check(key, now, true);
+  }
+
+  peek(key: string, now = Date.now()): number {
+    return this.check(key, now, false);
+  }
+
+  delete(key: string): void {
+    this.buckets.delete(key);
+  }
+
+  private check(key: string, now: number, consume: boolean): number {
     if (this.perMin <= 0) return 0;
     let b = this.buckets.get(key);
     if (b) {
       b.tokens = Math.min(this.perMin, b.tokens + ((now - b.at) / 1000) * this.perSec);
       b.at = now;
     } else {
+      if (!consume) return 0; // unknown key = full bucket; don't track it just for a peek
       if (this.buckets.size >= MAX_RATE_BUCKETS) this.evict(now);
       b = { tokens: this.perMin, at: now };
       this.buckets.set(key, b);
     }
     if (b.tokens >= 1) {
-      b.tokens -= 1;
+      if (consume) b.tokens -= 1;
       return 0;
     }
     return Math.max(1, Math.ceil((1 - b.tokens) / this.perSec));
@@ -307,7 +391,11 @@ class RateLimiter {
   }
 }
 
-async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMode): Promise<Server> {
+async function buildServer(
+  daemon: DaemonClient,
+  sessionId: string,
+  mode: ToolMode,
+): Promise<{ server: Server; dispose: () => void }> {
   await daemon.call("session.ensure", { sessionId, source: "http" });
   const advertised = selectTools(mode);
   // One mutable context per connection — `session_attach` reassigns conn.sessionId.
@@ -316,7 +404,7 @@ async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMo
     { name: "lean-chronoscope-mcp", version: VERSION },
     { capabilities: { tools: {}, resources: { subscribe: true, listChanged: true } } },
   );
-  registerResourceHandlers({ server, daemon, sessionId, allTools });
+  const dispose = registerResourceHandlers({ server, daemon, sessionId, allTools });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: advertised.map((t) => ({
       name: t.name,
@@ -339,7 +427,7 @@ async function buildServer(daemon: DaemonClient, sessionId: string, mode: ToolMo
       return new McpResponse().setError(`${name} failed: ${msg}`).build() as never;
     }
   });
-  return server;
+  return { server, dispose };
 }
 
 async function readJsonBody(req: http.IncomingMessage, maxBytes: number): Promise<unknown> {
