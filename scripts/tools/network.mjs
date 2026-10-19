@@ -3,16 +3,14 @@
 // the interception layer answers — giving a real completed request to inspect.
 // The seed also fetches /api/data?access_token=SECRET123; every tool's text AND
 // structuredContent must have that value redacted (tool-smoke.test is external).
-import { URL_SECRET } from "./fixture.mjs";
+// The page itself is loaded at ?access_token=SECRET456, which also rides along
+// in the document request URL and the fetch's Referer header.
+import { URL_SECRET, assertNoSecret } from "./fixture.mjs";
 
 export async function run(ctx) {
   const { callTool, sc, txt, t, assert } = ctx;
 
-  // Asserts the secret appears nowhere in the tool result (text or structured).
-  const noSecret = (r, tool) => {
-    const blob = txt(r) + JSON.stringify(r.structuredContent ?? {});
-    assert(!blob.includes(URL_SECRET), `${tool} leaked ${URL_SECRET}`);
-  };
+  const noSecret = (r, tool) => assertNoSecret(r, tool, txt);
 
   await t("network_wait_for", async () => {
     const r = sc(await callTool("network_wait_for", { urlContains: "api/data", timeoutMs: 8000 }));

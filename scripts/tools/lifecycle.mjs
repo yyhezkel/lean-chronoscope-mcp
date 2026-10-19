@@ -1,8 +1,10 @@
 // Page + session lifecycle: page_new/list/select/back/forward/reload/close and
 // session_new. (page_navigate and session_close/list are covered by the runner.)
 // Runs last because it churns the page set and active selection.
+import { assertNoSecret } from "./fixture.mjs";
+
 export async function run(ctx) {
-  const { callTool, sc, t, assert } = ctx;
+  const { callTool, sc, txt, t, assert } = ctx;
 
   let newPage;
   await t("page_new", async () => {
@@ -13,9 +15,13 @@ export async function run(ctx) {
   });
 
   await t("page_list", async () => {
-    const r = sc(await callTool("page_list", {}));
+    const raw = await callTool("page_list", {});
+    const r = sc(raw);
     assert((r.pages?.length ?? 0) >= 2, `pages=${r.pages?.length}`);
-    return `${r.pages.length} pages`;
+    // The seed page was loaded at ?access_token=SECRET456 — URL must be redacted.
+    assertNoSecret(raw, "page_list", txt);
+    assert(r.pages.some((p) => p.url.includes("access_token=[REDACTED]")), "seed page url not redacted");
+    return `${r.pages.length} pages, secret redacted`;
   });
 
   await t("page_select", async () => {

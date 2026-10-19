@@ -13,12 +13,22 @@ export const SEED_URL = "https://tool-smoke.test/";
 export const API_URL = "https://tool-smoke.test/api/data";
 /** Secret carried in a query param by the seed page's second fetch; must never surface in tool output. */
 export const URL_SECRET = "SECRET123";
+/** Secret in the seed page's own URL (page_navigate target); must never surface in tool output. */
+export const PAGE_SECRET = "SECRET456";
+export const SECRET_SEED_URL = `${SEED_URL}?access_token=${PAGE_SECRET}`;
 export const SEED_HTML = readFileSync(join(here, "../fixtures/tool-smoke.html"), "utf8");
 
 export async function installSeed({ callTool, sc }) {
   const doc = sc(
     await callTool("intercept_add", {
       urlPattern: SEED_URL,
+      action: { kind: "respond", status: 200, mimeType: "text/html", body: SEED_HTML },
+    }),
+  );
+  // Same seed document, served at a URL carrying a secret query param.
+  const page = sc(
+    await callTool("intercept_add", {
+      urlPattern: `${SEED_URL}?access_token=*`,
       action: { kind: "respond", status: 200, mimeType: "text/html", body: SEED_HTML },
     }),
   );
@@ -33,5 +43,13 @@ export async function installSeed({ callTool, sc }) {
       },
     }),
   );
-  return { docRuleId: doc.rule?.id, apiRuleId: api.rule?.id };
+  return { docRuleId: doc.rule?.id, pageRuleId: page.rule?.id, apiRuleId: api.rule?.id };
+}
+
+/** Throws if any fixture secret appears in a tool result's text or structuredContent. */
+export function assertNoSecret(r, tool, txt) {
+  const blob = txt(r) + JSON.stringify(r.structuredContent ?? {});
+  for (const s of [URL_SECRET, PAGE_SECRET]) {
+    if (blob.includes(s)) throw new Error(`${tool} leaked ${s}`);
+  }
 }

@@ -126,9 +126,13 @@ async function main() {
   // ---- install seed page + navigate ----
   const seedRules = await fixture.installSeed(ctx);
   await t("page_navigate", async () => {
-    const r = sc(await callTool("page_navigate", { url: fixture.SEED_URL }));
+    // Seed page served at a URL with a secret query param — the echoed URL must be redacted.
+    const raw = await callTool("page_navigate", { url: fixture.SECRET_SEED_URL });
+    const r = sc(raw);
     assert(r.status === 200, `status=${r.status}`);
-    return `status ${r.status}`;
+    fixture.assertNoSecret(raw, "page_navigate", txt);
+    assert(r.url.includes("access_token=[REDACTED]"), `url=${r.url}`);
+    return `status ${r.status}, secret redacted`;
   });
   await t("wait_for", async () => {
     const r = sc(await callTool("wait_for", { text: "READY_TOKEN", timeoutMs: 8000 }));
@@ -298,7 +302,9 @@ async function main() {
     assert(hasImage(r0), "no image content");
     const r = sc(r0);
     assert(r.width > 0 && r.height > 0, `${r.width}x${r.height}`);
-    return `${r.width}x${r.height}`;
+    fixture.assertNoSecret(r0, "screenshot_take", txt);
+    assert(r.url.includes("access_token=[REDACTED]"), `url=${r.url}`);
+    return `${r.width}x${r.height}, secret redacted`;
   });
 
   // ---- page + session lifecycle (churns pages — run last) ----
@@ -306,6 +312,7 @@ async function main() {
 
   // ---- teardown: remove seed rules, close our own session (positive close) ----
   try { if (seedRules.docRuleId) await callTool("intercept_remove", { id: seedRules.docRuleId }); } catch {}
+  try { if (seedRules.pageRuleId) await callTool("intercept_remove", { id: seedRules.pageRuleId }); } catch {}
   try { if (seedRules.apiRuleId) await callTool("intercept_remove", { id: seedRules.apiRuleId }); } catch {}
   await t("session_close", async () => {
     const r = sc(await callTool("session_close", {}));

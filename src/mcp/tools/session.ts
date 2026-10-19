@@ -7,8 +7,11 @@ import type {
   SessionResolveResult,
 } from "@shared/protocol.js";
 import { randomSessionId } from "@shared/ids.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 export const sessionList = defineTool({
   name: "session_list",
@@ -40,10 +43,11 @@ export const sessionNew = defineTool({
   }),
   handler: async (input, ctx) => {
     // The daemon auto-ensures ctx.sessionId; opening a page is the observable effect.
-    const r = await ctx.daemon.call<PageNewResult>("page.new", {
+    const raw = await ctx.daemon.call<PageNewResult>("page.new", {
       sessionId: ctx.sessionId,
       url: input.url,
     });
+    const r: PageNewResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
     return new McpResponse()
       .addSection("Result", `Session ${ctx.sessionId} ready; page ${r.pageId} — ${r.url}`)
       .setStructured({ sessionId: ctx.sessionId, ...r })

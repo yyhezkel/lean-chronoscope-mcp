@@ -6,6 +6,8 @@ import {
   UnsubscribeRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getLogger } from "@shared/logger.js";
+import { loadRedactConfigFromEnv, redactBody, redactUrl, type RedactConfig } from "@shared/redact.js";
+import { parseUri } from "@daemon/live/uri.js";
 import type {
   ResourcesListResult,
   ResourcesReadResult,
@@ -16,6 +18,7 @@ import { renderDocsTools } from "./docs-tools.js";
 import { DOCS_TOOLS_URI, isStaticMcpResource } from "./registry.js";
 
 const log = getLogger("mcp/resources");
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 export interface ResourceHandlersOptions {
   server: Server;
@@ -58,7 +61,11 @@ export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
         {
           uri: result.uri,
           mimeType: "application/json",
-          text: JSON.stringify({ revision: result.revision, data: result.data }, null, 2),
+          text: JSON.stringify(
+            { revision: result.revision, data: redactResourceData(result.uri, result.data, REDACT_CFG) },
+            null,
+            2,
+          ),
         },
       ],
     };
@@ -99,4 +106,40 @@ export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
         .catch((err) => log.warn({ err, uri }, "sendResourceListChanged failed"));
     }
   });
+}
+
+type Row = Record<string, unknown>;
+
+/** Redact one captured row: its `url` via redactUrl, text-ish fields via redactBody gated on that url. */
+function redactRow(row: Row, cfg: RedactConfig): Row {
+  const url = typeof row.url === "string" ? row.url : null;
+  const out: Row = { ...row };
+  if (url != null) out.url = redactUrl(url, cfg);
+  for (const k of ["text", "message", "stack", "args", "description"]) {
+    if (typeof row[k] === "string") out[k] = redactBody(row[k] as string, url, cfg);
+  }
+  return out;
+}
+
+/**
+ * Apply the same URL/body redaction the tools use to daemon resource payloads
+ * that carry page URLs or captured rows (`.../url`, `.../pages`, console/
+ * network/exceptions live feeds). Other kinds pass through untouched.
+ */
+function redactResourceData(uri: string, data: unknown, cfg: RedactConfig): unknown {
+  if (data == null || typeof data !== "object") return data;
+  switch (parseUri(uri)?.kind) {
+    case "page.url":
+      return { ...(data as Row), url: redactUrl((data as { url?: string }).url, cfg) };
+    case "session.pages":
+      return Array.isArray(data) ? data.map((p: Row) => redactRow(p, cfg)) : data;
+    case "page.console":
+    case "page.network":
+    case "page.exceptions": {
+      const d = data as { rows?: Row[] };
+      return Array.isArray(d.rows) ? { ...d, rows: d.rows.map((r) => redactRow(r, cfg)) } : data;
+    }
+    default:
+      return data;
+  }
 }

@@ -1,7 +1,10 @@
 import { z } from "zod";
 import type { ScreenshotTakeResult } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const ScreenshotInput = z.object({
   pageId: z.string().optional(),
@@ -23,17 +26,18 @@ export const screenshotTake = defineTool({
       format: input.format,
       quality: input.quality,
     });
+    const url = redactUrl(result.url, REDACT_CFG);
     const mimeType =
       result.format === "jpeg" ? "image/jpeg" : result.format === "webp" ? "image/webp" : "image/png";
     return new McpResponse()
       .addSection(
         "Result",
-        `Screenshot of ${result.url}\n${result.width}x${result.height} • ${result.bytes} bytes • ${result.format}`,
+        `Screenshot of ${url}\n${result.width}x${result.height} • ${result.bytes} bytes • ${result.format}`,
       )
       .addImage(result.data, mimeType)
       .setStructured({
         pageId: result.pageId,
-        url: result.url,
+        url,
         width: result.width,
         height: result.height,
         format: result.format,
