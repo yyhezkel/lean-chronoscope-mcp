@@ -291,9 +291,13 @@ async function main() {
 
   // ---- performance ----
   await t("performance_metrics", async () => {
-    const r = sc(await callTool("performance_metrics", {}));
+    const raw = await callTool("performance_metrics", {});
+    const r = sc(raw);
     assert(r.metrics && typeof r.metrics.Nodes === "number", `Nodes=${r.metrics?.Nodes}`);
-    return `Nodes=${r.metrics.Nodes}`;
+    // Active page is the seed page at ?access_token=SECRET456 — URL must be redacted.
+    fixture.assertNoSecret(raw, "performance_metrics", txt);
+    assert(r.url.includes("access_token=[REDACTED]"), `url=${r.url}`);
+    return `Nodes=${r.metrics.Nodes}, secret redacted`;
   });
 
   // ---- screenshot ----

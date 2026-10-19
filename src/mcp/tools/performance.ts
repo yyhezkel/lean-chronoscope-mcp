@@ -1,9 +1,12 @@
 import { z } from "zod";
 import type { PerformanceMetricsResult } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
 
 const Input = z.object({ pageId: z.string().optional() });
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 export const performanceMetrics = defineTool({
   name: "performance_metrics",
@@ -12,10 +15,11 @@ export const performanceMetrics = defineTool({
   category: "performance",
   inputSchema: Input,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<PerformanceMetricsResult>("performance.metrics", {
+    const raw = await ctx.daemon.call<PerformanceMetricsResult>("performance.metrics", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    const r: PerformanceMetricsResult = { ...raw, url: redactUrl(raw.url, REDACT_CFG) };
     const cdp = formatCdpMetrics(r.metrics);
     const timing = r.timing ? formatTiming(r.timing) : "(unavailable)";
     const paint = r.paint

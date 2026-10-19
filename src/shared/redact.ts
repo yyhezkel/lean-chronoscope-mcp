@@ -49,10 +49,27 @@ const URL_HEADERS = new Set(["referer", "location", "content-location", ":path"]
 
 /**
  * Key names whose values are treated as secrets — shared by the JSON and
- * form-encoded body patterns and by the URL query-param redaction.
+ * form-encoded body patterns and by the URL query-param redaction. Only
+ * unambiguous, compound names live here: body text is free-form, so a short
+ * generic word would redact ordinary prose / JSON (`"code": 404`, `"key": "id"`).
  */
 const SECRET_KEY_SRC =
-  "access_?token|auth_?token|password|passwd|secret|api[_-]?key|client[_-]?secret|refresh[_-]?token|bearer";
+  "access_?token|auth_?token|id_?token|password|passwd|secret|api[_-]?key|client[_-]?secret|refresh[_-]?token|bearer|jwt";
+
+/**
+ * Extra key names treated as secrets ONLY as URL params (`?name=` / `&name=` /
+ * `#name=` / `;name=`), where the param name is exact and delimited, so short
+ * generic names are safe to match there: bare `token`, OAuth `code`, Google
+ * `?key=AIza…`, signed-URL `sig`/`signature`, AWS SigV4 presign params
+ * (`X-Amz-Signature`, `X-Amz-Credential`, `X-Amz-Security-Token`), GCS V4
+ * (`X-Goog-Signature`, `X-Goog-Credential`), and session ids. Deliberately NOT
+ * added to the body patterns — there they would cause false positives.
+ * Matching is case-insensitive.
+ */
+const URL_ONLY_KEY_SRC =
+  "token|code|key|sig|signature|auth|session|session_?id|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential";
+
+const URL_KEY_SRC = `${SECRET_KEY_SRC}|${URL_ONLY_KEY_SRC}`;
 
 /**
  * Regexes that strip secret-shaped substrings inside bodies. Kept conservative
@@ -83,8 +100,18 @@ const BODY_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
 
 /** Userinfo of a whole URL string: everything between `scheme://` and the last `@` of the authority. */
 const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
-/** Secret query/fragment params; value stops at `&` or `#` so the rest of the URL survives. */
-const URL_PARAM_RE = new RegExp(`([?&#;](?:${SECRET_KEY_SRC})=)[^&#\\s]*`, "gi");
+/**
+ * Secret query/fragment params; value stops at `&`, `#` or whitespace so the
+ * rest of the URL survives. A `/` (or `?`) does NOT end a query value: secrets
+ * such as base64 signatures may contain `/`, and stopping there would leak the
+ * tail — over-redacting the remainder of a query is the safer failure.
+ */
+const URL_QUERY_PARAM_RE = new RegExp(`([?&#;](?:${URL_KEY_SRC})=)[^&#\\s]*`, "gi");
+/**
+ * Secret matrix params in the PATH (`/p;secret=x/more`): value also stops at
+ * `/`, `;` and `?` so the remaining path segments and the query survive.
+ */
+const URL_PATH_PARAM_RE = new RegExp(`([;&](?:${URL_KEY_SRC})=)[^&#;/?\\s]*`, "gi");
 
 export function loadRedactConfigFromEnv(): RedactConfig {
   const rawMode = (env("REDACT_MODE") ?? "external").toLowerCase();
@@ -184,5 +211,12 @@ export function redactUrl<T extends string | null | undefined>(url: T, cfg: Reda
 }
 
 function redactUrlString(url: string): string {
-  return url.replace(URL_USERINFO_RE, "$1[REDACTED]@").replace(URL_PARAM_RE, "$1[REDACTED]");
+  const u = url.replace(URL_USERINFO_RE, "$1[REDACTED]@");
+  // Split at the first `?`/`#`: before it is the path (matrix-param rules),
+  // from it on is the query/fragment (query-param rules). Idempotent:
+  // `[REDACTED]` contains none of the delimiters and re-redacts to itself.
+  const cut = u.search(/[?#]/);
+  const path = cut === -1 ? u : u.slice(0, cut);
+  const rest = cut === -1 ? "" : u.slice(cut);
+  return path.replace(URL_PATH_PARAM_RE, "$1[REDACTED]") + rest.replace(URL_QUERY_PARAM_RE, "$1[REDACTED]");
 }
