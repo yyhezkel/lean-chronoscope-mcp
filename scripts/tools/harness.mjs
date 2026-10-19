@@ -6,10 +6,13 @@ import readline from "node:readline";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Target container; override with LC_CONTAINER to test a non-production build. */
+export const CONTAINER = process.env.LC_CONTAINER ?? "lean-chronoscope-mcp";
+
 export function spawnMcp(sessionId) {
   const proc = spawn(
     "docker",
-    ["exec", "-i", "lean-chronoscope-mcp", "node", "/app/dist/bin/mcp.js", "--session", sessionId],
+    ["exec", "-i", CONTAINER, "node", "/app/dist/bin/mcp.js", "--session", sessionId],
     { stdio: ["pipe", "pipe", "inherit"] },
   );
 

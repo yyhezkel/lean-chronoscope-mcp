@@ -12,7 +12,7 @@
 // Exits 0 only when every tool PASSes.
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { spawnMcp, sleep } from "./tools/harness.mjs";
+import { CONTAINER, spawnMcp, sleep } from "./tools/harness.mjs";
 import * as fixture from "./tools/fixture.mjs";
 import { run as inputTests } from "./tools/input.mjs";
 import { run as networkTests } from "./tools/network.mjs";
@@ -54,7 +54,7 @@ async function main() {
   // Place the upload fixture inside the container for upload_file.
   try {
     const local = fileURLToPath(new URL("./fixtures/upload.txt", import.meta.url));
-    execSync(`docker cp "${local}" lean-chronoscope-mcp:${CONTAINER_UPLOAD}`, { stdio: "ignore" });
+    execSync(`docker cp "${local}" ${CONTAINER}:${CONTAINER_UPLOAD}`, { stdio: "ignore" });
   } catch (e) {
     console.error("warn: could not copy upload fixture:", e.message);
   }
