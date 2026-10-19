@@ -340,3 +340,18 @@ Container: `LC_CONTAINER=lc-s1 LC_TEST_PORT=18821 scripts/test-container.sh -e L
 - real Claude Code 2.1.303 over HTTP, HTTP_IDLE_MS=8s: live client (open SSE)
   not swept across a 30s pause; `claude -p` exit without DELETE → swept ~10s later
 - `docker stop` → exit 0 in 1s
+
+---
+
+## 2026-10-19 — v1.7.0 post-merge on local main (b092957, test container lc-main-test)
+
+- typecheck / build ............................................. OK
+- vitest ........................................................ 26/26 PASS
+- test-all-tools ................................................ 58/58 PASS
+- smoke-test-v17-screencast / relaunch / lifecycle .............. PASS / ALL PASS / ALL PASS
+- smoke-test-v17-screencast (g, watched page vs reaper) ......... PASS
+- smoke-test-m2-mcp ............................................. PASS
+- smoke-test-http-bridge (default + HTTP_IDLE_MS=8s) ............ PASS / PASS
+- real Claude Code over HTTP: navigate → 30s pause → daemon_status = ok (v1.7.0);
+  session swept after exit (/health sessions=0)
+- `docker stop` → exit 0
