@@ -272,3 +272,11 @@ Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Sum
 - smoke-test-v17-screencast ..................................... PASS
 - smoke-test-m2-mcp ............................................. PASS
 - smoke-test-http-bridge (plain http) ........................... PASS
+
+---
+
+## 2026-10-19 — review/R3-screencast (reaper skips watched pages, start-race + retry fixes, test container lc-r3)
+
+- smoke-test-v17-screencast (PAGE_IDLE_MS=6s, reaper 2s, SMOKE_PAGE_IDLE_MS=6000) incl. new [g] watched page survives / reaped after unsubscribe, [h] cast starts on late page creation ... PASS
+- smoke-test-v17-screencast (default container; [g] skipped) ... PASS
+- test-all-tools ... 58/58 PASS

@@ -241,21 +241,36 @@ export class RpcDispatcher {
     this.sessions = new SessionRegistry(browser, broadcaster, registry);
     this.screencast = new ScreencastManager(broadcaster);
     // The CDP screencast runs only while its resource URI has subscribers.
+    // onFirst may find no page yet (or start may fail), so a cast that should
+    // be running is also (re)started lazily on page creation and on read.
     subscriptions.setUriHooks({
-      onFirst: (uri) => {
-        const parsed = parseUri(uri);
-        if (parsed?.kind !== "page.screencast") return;
-        const sp = this.sessions.sessions.get(parsed.sessionId)?.pages.get(parsed.pageId);
-        if (!sp) {
-          log.debug({ uri }, "screencast subscribe for unknown page; not started");
-          return;
-        }
-        void this.screencast.start(uri, sp.page, sp.pageId);
-      },
+      onFirst: (uri) => this.ensureScreencast(uri),
       onLast: (uri) => {
         if (parseUri(uri)?.kind === "page.screencast") void this.screencast.stop(uri);
       },
     });
+    const castUri = (sessionId: string, pageId: string) =>
+      buildUri({ kind: "page.screencast", sessionId, pageId });
+    // Screencast watching is passive (no pageId-bearing RPCs); keep the reaper off it.
+    this.sessions.isPageWatched = (sessionId, pageId) => {
+      const uri = castUri(sessionId, pageId);
+      return subscriptions.subscriberCount(uri) > 0 || this.screencast.isActive(uri);
+    };
+    this.sessions.onPageCreated = (sessionId, pageId) =>
+      this.ensureScreencast(castUri(sessionId, pageId));
+  }
+
+  /** Start the screencast for `uri` if it has subscribers but no running cast. */
+  private ensureScreencast(uri: string): void {
+    const parsed = parseUri(uri);
+    if (parsed?.kind !== "page.screencast") return;
+    if (this.subscriptions.subscriberCount(uri) === 0 || this.screencast.isActive(uri)) return;
+    const sp = this.sessions.sessions.get(parsed.sessionId)?.pages.get(parsed.pageId);
+    if (!sp) {
+      log.debug({ uri }, "screencast subscribe for unknown page; not started yet");
+      return;
+    }
+    void this.screencast.start(uri, sp.page, sp.pageId);
   }
 
   async closeAll(): Promise<void> {
@@ -1292,6 +1307,7 @@ export class RpcDispatcher {
         // Latest live frame while subscribed; otherwise (or before the first
         // frame arrives) capture one on demand so a read never comes back empty.
         const sp = this.sessions.getPage(parsed.sessionId, parsed.pageId);
+        this.ensureScreencast(params.uri); // retry a cast whose start failed/was missed
         const frame = this.screencast.latest(params.uri);
         if (frame) {
           data = { mimeType: "image/jpeg", blob: frame.data, ts: frame.ts, source: "screencast" };

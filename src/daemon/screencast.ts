@@ -93,7 +93,10 @@ export class ScreencastManager {
       log.info({ uri, pageId }, "screencast started");
     } catch (err) {
       log.warn({ err, uri, pageId }, "screencast start failed");
-      await this.stop(uri);
+      // Only stop our own cast: if this one was stopped and a newer cast for the
+      // same URI started meanwhile, stopping by URI would kill the newer one.
+      if (this.casts.get(uri) === cast) await this.stop(uri);
+      else await this.teardown(cast);
     }
   }
 
