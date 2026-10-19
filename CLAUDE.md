@@ -119,6 +119,19 @@ no longer referenced by ANY surviving row (content-addressed dedup is respected:
 shared blob stays while any row points to it), instead of leaving orphaned blobs
 until the 7-day age sweep (`BlobStore.sweepUnreferenced(keep)` + `BlobStore.remove(sha)`).
 
+**Chrome crash recovery (in-process relaunch):** if Chrome disconnects
+unexpectedly, the daemon does NOT exit — `index.ts` relaunches Chrome in-process
+with backoff (3 attempts at ~1s/3s/9s) and `RpcDispatcher.replaceBrowser()` →
+`SessionRegistry.rebind()` re-points every live session at the new browser: a
+fresh `BrowserContext`, old pages dropped (rows marked closed), intercept rules
+kept (`InterceptionEngine.resetPages()`), per-page emulation lost; all captured
+history on disk stays readable. The same MCP connection keeps working
+(`page_navigate` opens a new page). While relaunching, `dispatch()` gates
+browser-touching RPCs (bounded 30s wait, then a `BROWSER_DISCONNECTED` error);
+passive reads/status stay answerable. `daemon_status` reports `chromeRelaunches`
++ `lastChromeRelaunchAt`. Only if all attempts fail does it fall back to exiting
+for Docker to restart it. Smoke: `scripts/smoke-test-v17-relaunch.mjs`.
+
 **Session reuse:** sessions can carry an optional `title` (a new column in
 `registry.sqlite`, added via idempotent `ALTER TABLE`); the RPC
 `session.resolve({title})` returns the newest active session id with that title.

@@ -227,3 +227,19 @@ Summary: **58/58 PASS** + 15/15 unit
 - (d) wait_for (10s, never matches) concurrent with page_navigate → nav=351ms, wait=10087ms ... PASS
 
 Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Summary: **58/58 PASS**
+
+## 2026-10-19 — In-process Chrome relaunch (test container `lc-test-e`, :18805)
+
+`LC_CONTAINER=lc-test-e node scripts/smoke-test-v17-relaunch.mjs` (`pkill -9 -f chrome` under a live session):
+- console/network captured before kill ........................................ PASS
+- daemon PID unchanged (pid=7), container not restarted (RestartCount 0) ....... PASS
+- daemon_status ok + browserConnected, chromeRelaunches = 1, lastChromeRelaunchAt set ... PASS
+- fresh chrome processes (no old PIDs) ......................................... PASS
+- intercept rule survived + still applied on new page ........................... PASS
+- page_navigate works in the same MCP session (new page p_2), page_list = [p_2] .. PASS
+- pre-kill console/network history readable by old pageId ........................ PASS
+- relaunch log: disconnect → attempt 1 → rebound in ~1.5s
+
+`LC_CONTAINER=lc-test-e node scripts/test-all-tools.mjs` (after the relaunch) — Summary: **58/58 PASS**
+`docker stop lc-test-e` → exit=0, "daemon stopped" in `/var/log/lean-chronoscope/lean-chronoscope.log`
+

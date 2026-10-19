@@ -68,7 +68,7 @@ export class SessionRegistry {
   readonly sessions = new Map<string, Session>();
 
   constructor(
-    private readonly browser: Browser,
+    private browser: Browser,
     private readonly broadcaster?: Broadcaster,
     private readonly registry?: RegistryStore,
   ) {}
@@ -239,6 +239,42 @@ export class SessionRegistry {
     this.sessions.delete(sessionId);
     this.broadcast(buildUri({ kind: "sessions" }), "sessions");
     return true;
+  }
+
+  /**
+   * Re-point every live session at a freshly relaunched Chrome (see index.ts).
+   * The old browser is gone, so all browser-bound state is dropped: pages are
+   * disposed (listeners first, so a late 'close' from the dead target can't
+   * touch the map) and their rows marked closed; the intercept engine forgets
+   * its dead CDP sessions but keeps its rules; a new BrowserContext is created.
+   * Everything on disk (db/blobs/writer/reader/registry row) is untouched, so
+   * captured history stays readable. Per-page emulation is lost. A session that
+   * fails to rebind is closed rather than left pointing at a dead context.
+   */
+  async rebind(browser: Browser): Promise<void> {
+    this.browser = browser;
+    for (const s of Array.from(this.sessions.values())) {
+      try {
+        for (const ps of s.pages.values()) {
+          this.disposePage(ps);
+          try {
+            s.writer.markPageClosed(ps.pageId);
+          } catch (err) {
+            log.warn({ err, sessionId: s.id, pageId: ps.pageId }, "rebind: markPageClosed failed");
+          }
+        }
+        s.pages.clear();
+        s.selectedPageId = null;
+        s.intercept.resetPages();
+        s.context = await browser.createBrowserContext();
+        log.info({ sessionId: s.id, rules: s.intercept.list().length }, "session rebound to relaunched Chrome");
+        this.broadcast(buildUri({ kind: "session.pages", sessionId: s.id }), "pages");
+      } catch (err) {
+        log.error({ err, sessionId: s.id }, "rebind failed — closing session");
+        await this.closeSession(s.id).catch((e) => log.warn({ err: e, sessionId: s.id }, "close after failed rebind"));
+      }
+    }
+    this.broadcast(buildUri({ kind: "sessions" }), "sessions");
   }
 
   async closeAll(): Promise<void> {

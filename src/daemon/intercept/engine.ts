@@ -139,6 +139,16 @@ export class InterceptionEngine {
     this.rules.clear();
   }
 
+  /**
+   * Forget every per-page CDP session WITHOUT touching the rules — used when
+   * Chrome is relaunched in-process: the old sessions died with the old
+   * browser (nothing to disable/detach), and the rules must carry over so the
+   * new pages get `Fetch.enable` on attach. Unlike `dispose()`, rules survive.
+   */
+  resetPages(): void {
+    this.pages.clear();
+  }
+
   private async syncAllPages(): Promise<void> {
     if (this.rules.size === 0) {
       // Disable Fetch on every page so we stop intercepting.

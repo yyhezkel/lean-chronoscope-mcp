@@ -224,9 +224,14 @@ declare const indexedDB: any;
 export class RpcDispatcher {
   private readonly sessions: SessionRegistry;
   private readonly startedAt = Date.now();
+  /** Set while Chrome is being relaunched in-process; gates browser-touching RPCs. */
+  private relaunching: Promise<void> | null = null;
+  private relaunchDone?: () => void;
+  private chromeRelaunches = 0;
+  private lastChromeRelaunchAt: number | null = null;
 
   constructor(
-    private readonly browser: Browser,
+    private browser: Browser,
     private readonly broadcaster: Broadcaster,
     private readonly subscriptions: SubscriptionRegistry,
     private readonly registry?: RegistryStore,
@@ -243,7 +248,51 @@ export class RpcDispatcher {
     await this.sessions.reapTick();
   }
 
+  /** Start gating RPCs: Chrome died and index.ts is relaunching it. Idempotent. */
+  beginRelaunch(): void {
+    if (this.relaunching) return;
+    this.relaunching = new Promise((r) => (this.relaunchDone = r));
+  }
+
+  /** Release the gate (relaunch succeeded, or gave up and the daemon is exiting). */
+  endRelaunch(): void {
+    this.relaunchDone?.();
+    this.relaunching = null;
+    this.relaunchDone = undefined;
+  }
+
+  /** Swap in a freshly launched Chrome and rebind every live session to it. */
+  async replaceBrowser(browser: Browser): Promise<void> {
+    this.browser = browser;
+    this.chromeRelaunches++;
+    this.lastChromeRelaunchAt = Date.now();
+    await this.sessions.rebind(browser);
+  }
+
+  /** Bounded wait for an in-progress relaunch; RPCs must not hit the dead browser. */
+  private async awaitRelaunch(): Promise<void> {
+    const gate = this.relaunching;
+    if (!gate) return;
+    const waitMs = 30_000;
+    let timer: NodeJS.Timeout | undefined;
+    const ok = await Promise.race([
+      gate.then(() => true),
+      new Promise<boolean>((r) => (timer = setTimeout(() => r(false), waitMs))),
+    ]);
+    clearTimeout(timer);
+    if (!ok) {
+      throw DaemonError.browserDisconnected(
+        `Chrome is relaunching after a crash and did not come back within ${waitMs / 1000}s — retry shortly`,
+      );
+    }
+  }
+
   async dispatch(method: DaemonMethod, params: unknown, ctx?: ConnectionContext): Promise<unknown> {
+    // Passive meta RPCs (status, lists, history reads) stay answerable during a
+    // relaunch; session.ensure is passive but creates a BrowserContext, so gate it.
+    if (this.relaunching && (!PASSIVE_METHODS.has(method) || method === "session.ensure")) {
+      await this.awaitRelaunch();
+    }
     // Touch last-activity + hold an in-flight guard so the reaper never evicts a
     // session (or closes a page) mid-RPC. Integer writes on a Map hit — no disk,
     // no error swallowing (try/finally, not try/catch).
@@ -1503,6 +1552,8 @@ export class RpcDispatcher {
       startedAt: this.startedAt,
       uptimeSec: Math.round((Date.now() - this.startedAt) / 1000),
       browserConnected: this.browser.connected,
+      chromeRelaunches: this.chromeRelaunches,
+      lastChromeRelaunchAt: this.lastChromeRelaunchAt,
       sessions,
       subscriptions: this.subscriptions.totalCount(),
     };

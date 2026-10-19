@@ -696,6 +696,10 @@ export interface DaemonStatusResult {
   startedAt: number;
   uptimeSec: number;
   browserConnected: boolean;
+  /** Times Chrome was relaunched in-process after an unexpected disconnect. */
+  chromeRelaunches: number;
+  /** ms of the last in-process relaunch (null if never). */
+  lastChromeRelaunchAt: number | null;
   sessions: Array<{
     id: string;
     createdAt: number;

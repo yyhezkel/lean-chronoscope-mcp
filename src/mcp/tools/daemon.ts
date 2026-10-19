@@ -11,7 +11,7 @@ export const daemonStatus = defineTool({
   inputSchema: z.object({}),
   handler: async (_input, ctx) => {
     const r = await ctx.daemon.call<DaemonStatusResult>("daemon.status", {});
-    const header = `v${r.version}  uptime=${r.uptimeSec}s  browser=${r.browserConnected ? "✓" : "✗"}  subs=${r.subscriptions}  sessions=${r.sessions.length}`;
+    const header = `v${r.version}  uptime=${r.uptimeSec}s  browser=${r.browserConnected ? "✓" : "✗"}  relaunches=${r.chromeRelaunches ?? 0}  subs=${r.subscriptions}  sessions=${r.sessions.length}`;
     const lines: string[] = [];
     for (const s of r.sessions) {
       const sel = s.selectedPageId ?? "-";
