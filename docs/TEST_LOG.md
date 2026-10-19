@@ -194,3 +194,13 @@ TLS (self-signed cert, `HTTP_TLS_CERT/KEY`, `HTTP_MAX_SESSIONS=2`), `LC_HTTP_URL
 Only `HTTP_TLS_CERT` set → "HTTP bridge NOT started" logged, port refuses (curl exit 56) ... PASS
 
 `LC_CONTAINER=lc-test-c node scripts/test-all-tools.mjs` (stdio) — Summary: **58/58 PASS**
+
+## 2026-10-19 — Per-session mutex + page-level reaper (test container `lc-test-d`, :18804)
+
+`PAGE_IDLE_MS=6000 REAPER_INTERVAL_MS=2000 MAX_PAGES_PER_SESSION=3` — `node scripts/smoke-test-v17-lifecycle.mjs`:
+- (a) un-awaited page_navigate + snapshot_take on a page-less session → both succeed, pages=1 ... PASS
+- (b) 5× page_new → reaper trims to 3 (before=5 after=3, "over-cap") ........... PASS
+- (c) idle background page reaped ("idle", ~6.9s), selected page survives ....... PASS
+- (d) wait_for (10s, never matches) concurrent with page_navigate → nav=351ms, wait=10087ms ... PASS
+
+Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Summary: **58/58 PASS**
