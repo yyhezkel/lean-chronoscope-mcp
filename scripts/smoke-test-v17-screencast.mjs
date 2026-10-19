@@ -4,6 +4,11 @@
 // subscribe → ≥2 resources/updated within 5s on an animated page, read returns
 // a base64 JPEG blob, unsubscribe → no more updates and the daemon logs
 // "screencast stopped", and page_close while subscribed is clean.
+// (g) with SMOKE_PAGE_IDLE_MS set (container run with matching
+// LEAN_CHRONOSCOPE_PAGE_IDLE_MS + a short REAPER_INTERVAL_MS): a non-selected
+// page watched only via screencast survives the page reaper, then is reaped
+// after unsubscribe. (h) subscribing before the page exists starts the cast
+// once the page is created.
 //
 //   LC_CONTAINER=lc-test-f LC_TEST_PORT=18806 scripts/test-container.sh
 //   LC_CONTAINER=lc-test-f node scripts/smoke-test-v17-screencast.mjs
@@ -12,6 +17,8 @@ import { spawn, execFileSync } from "node:child_process";
 import readline from "node:readline";
 
 const CONTAINER = process.env.LC_CONTAINER ?? "lean-chronoscope-mcp";
+const PAGE_IDLE_MS = Number(process.env.SMOKE_PAGE_IDLE_MS ?? 0);
+const REAPER_MS = Number(process.env.SMOKE_REAPER_INTERVAL_MS ?? 2000);
 const SESSION_ID = process.env.SMOKE_SESSION ?? `v17-cast-${Date.now()}`;
 const ANIM_URL =
   "data:text/html," +
@@ -156,6 +163,50 @@ async function main() {
     ok(readErr != null, `read on closed page errors cleanly (${readErr?.message?.slice(0, 60)})`);
     await rpc("resources/unsubscribe", { uri: castUri2 });
     ok(true, "unsubscribe after page close returned");
+
+    const readPages = async () =>
+      JSON.parse((await rpc("resources/read", { uri: pagesUri })).contents[0].text).data;
+    let lastPid = null;
+
+    if (PAGE_IDLE_MS > 0) {
+      console.log(`\n[g] watched non-selected page survives the reaper (PAGE_IDLE_MS=${PAGE_IDLE_MS})`);
+      await tool("page_new", { url: ANIM_URL }); // selected
+      const before = new Set((await readPages()).map((p) => p.pageId));
+      await tool("page_new", { url: ANIM_URL, background: true });
+      const pagesG = await readPages();
+      const pidW = pagesG.find((p) => !before.has(p.pageId))?.pageId;
+      ok(!!pidW && !pagesG.find((p) => p.pageId === pidW)?.selected, `watched page ${pidW} is not selected`);
+      lastPid = pidW;
+      const castUriW = `browser://session/${SESSION_ID}/page/${pidW}/screencast`;
+      await rpc("resources/subscribe", { uri: castUriW });
+      await sleep(PAGE_IDLE_MS + 2 * REAPER_MS + 1500);
+      ok((await readPages()).some((p) => p.pageId === pidW), `${pidW} not reaped after ${PAGE_IDLE_MS + 2 * REAPER_MS + 1500}ms`);
+      const t4 = Date.now();
+      await sleep(2000);
+      ok(updatesFor(castUriW, t4).length >= 1, `updates still flowing: ${updatesFor(castUriW, t4).length} in 2s`);
+      await rpc("resources/unsubscribe", { uri: castUriW });
+      await waitFor(() => false, 2 * REAPER_MS + 1000);
+      ok(!(await readPages()).some((p) => p.pageId === pidW), `${pidW} reaped after unsubscribe`);
+    } else {
+      console.log("\n[g] skipped (set SMOKE_PAGE_IDLE_MS + run the container with a short PAGE_IDLE_MS)");
+    }
+
+    console.log("\n[h] subscribe before the page exists → cast starts on page creation");
+    if (!lastPid) {
+      await tool("page_new", { url: ANIM_URL });
+      lastPid = (await readPages()).find((p) => p.selected)?.pageId;
+    }
+    const predicted = `p_${Number(lastPid.slice(2)) + 1}`;
+    const castUriH = `browser://session/${SESSION_ID}/page/${predicted}/screencast`;
+    await rpc("resources/subscribe", { uri: castUriH });
+    const t5 = Date.now();
+    await tool("page_new", { url: ANIM_URL });
+    const pidH = (await readPages()).find((p) => p.selected)?.pageId;
+    ok(pidH === predicted, `new page id ${pidH} (predicted ${predicted})`);
+    await waitFor(() => updatesFor(castUriH, t5).length >= 2, 5000);
+    ok(updatesFor(castUriH, t5).length >= 2, `updates after late page creation: ${updatesFor(castUriH, t5).length}`);
+    await rpc("resources/unsubscribe", { uri: castUriH });
+
     const status = await tool("daemon_status");
     ok(!status.isError, "daemon still healthy");
   } finally {

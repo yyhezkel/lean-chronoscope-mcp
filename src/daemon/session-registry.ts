@@ -66,6 +66,18 @@ export interface Session {
 
 export class SessionRegistry {
   readonly sessions = new Map<string, Session>();
+  /** True while a page is watched passively (live screencast subscribers).
+   *  Passive resource reads/subscriptions don't bump lastActivity, so the
+   *  reaper consults this to keep watched pages (and their session) alive. */
+  isPageWatched?: (sessionId: string, pageId: string) => boolean;
+  /** Fired after newPage registers a page (lets a pending screencast start). */
+  onPageCreated?: (sessionId: string, pageId: string) => void;
+
+  private hasWatchedPage(s: Session): boolean {
+    if (!this.isPageWatched) return false;
+    for (const pageId of s.pages.keys()) if (this.isPageWatched(s.id, pageId)) return true;
+    return false;
+  }
 
   constructor(
     private browser: Browser,
@@ -183,6 +195,7 @@ export class SessionRegistry {
     }
     log.info({ sessionId, pageId, url }, "page created");
     this.broadcast(buildUri({ kind: "session.pages", sessionId }), "pages");
+    this.onPageCreated?.(sessionId, pageId);
     return state;
   }
 
@@ -339,7 +352,8 @@ export class SessionRegistry {
           log.warn({ err, sessionId: s.id }, "prune failed");
         }
       }
-      const idle = now - s.lastActivity >= idleMs;
+      // A watched session (live screencast) is active even without RPCs.
+      const idle = now - s.lastActivity >= idleMs && !this.hasWatchedPage(s);
       const tooBig = sizeCap > 0 && size >= sizeCap;
       if (idle || tooBig) candidates.push(s);
     }
@@ -367,8 +381,9 @@ export class SessionRegistry {
 
   /**
    * Close a session's idle pages (idle >= pageIdleMs) and, beyond that, the
-   * oldest-idle pages over the maxPages cap. Never closes the selected page or
-   * one with an RPC in flight. Skips the session entirely while its lock is
+   * oldest-idle pages over the maxPages cap. Never closes the selected page,
+   * one with an RPC in flight, or one being watched (live screencast) — the
+   * cap closes other pages instead. Skips the session entirely while its lock is
    * held/queued; otherwise runs under the lock so no mutating RPC can start on
    * a page mid-close. Guards are re-checked inside the lock.
    */
@@ -377,7 +392,12 @@ export class SessionRegistry {
     const pick = (): Array<{ ps: PageState; reason: string }> => {
       const now = Date.now();
       const closable = Array.from(s.pages.values())
-        .filter((ps) => ps.pageId !== s.selectedPageId && ps.inFlight === 0)
+        .filter(
+          (ps) =>
+            ps.pageId !== s.selectedPageId &&
+            ps.inFlight === 0 &&
+            !this.isPageWatched?.(s.id, ps.pageId),
+        )
         .sort((a, b) => a.lastActivity - b.lastActivity);
       const out: Array<{ ps: PageState; reason: string }> = [];
       const picked = new Set<string>();
@@ -421,7 +441,7 @@ export class SessionRegistry {
   private async maybeEvict(s: Session, idleMs: number, sizeCap: number): Promise<void> {
     if (s.inFlight > 0) return; // an RPC (e.g. a 120s wait.for) is mid-flight
     const now = Date.now();
-    const idle = now - s.lastActivity >= idleMs;
+    const idle = now - s.lastActivity >= idleMs && !this.hasWatchedPage(s);
     const tooBig = sizeCap > 0 && s.sizeBytes >= sizeCap;
     if (!idle && !tooBig) return; // activity arrived during the size walk
     log.info(
