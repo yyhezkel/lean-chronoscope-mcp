@@ -79,14 +79,6 @@ export interface ListOptions {
 export class SessionReader {
   constructor(private readonly db: Database) {}
 
-  /** Latest navigation id for a page (newest first). 0-based index from latest. */
-  getNavIdsForPage(pageId: string, maxLast = 3): number[] {
-    return this.db
-      .prepare("SELECT id FROM navigations WHERE page_id = ? ORDER BY started_at DESC LIMIT ?")
-      .all(pageId, maxLast)
-      .map((r: any) => r.id as number);
-  }
-
   /** Newest navigation of a page with its loader id, or null if none yet. */
   getLatestNav(pageId: string): { id: number; loaderId: string } | null {
     const r = this.db

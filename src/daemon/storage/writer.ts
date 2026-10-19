@@ -86,6 +86,7 @@ export class SessionWriter {
   private readonly closePage;
   private readonly insNav;
   private readonly finNav;
+  private readonly navUrl;
   private readonly insConsole;
   private readonly insNetwork;
   private readonly updNetResp;
@@ -110,6 +111,7 @@ export class SessionWriter {
     this.finNav = db.prepare(
       `UPDATE navigations SET finished_at = ?, status = ? WHERE id = ?`,
     );
+    this.navUrl = db.prepare(`UPDATE navigations SET url = ? WHERE id = ?`);
     this.insConsole = db.prepare(
       `INSERT INTO console_messages (page_id, nav_id, ts, level, text, source, url, line, col, stack_blob, args_blob)
        VALUES (@pageId, @navId, @ts, @level, @text, @source, @url, @line, @col, @stack, @args)`,
@@ -166,6 +168,11 @@ export class SessionWriter {
 
   finishNavigation(id: number, status: string): void {
     this.finNav.run(Date.now(), status, id);
+  }
+
+  /** Same-document navigation (pushState/hash): keep the row, track its url. */
+  updateNavigationUrl(id: number, url: string): void {
+    this.navUrl.run(url, id);
   }
 
   insertConsole(row: InsertConsoleRow): number {

@@ -42,4 +42,25 @@ export async function run(ctx) {
     assert(doc, `no document row for ${state.seedUrl} in default scope (total=${r.total}: ${(r.rows ?? []).map((x) => x.url).join(", ")})`);
     return `doc #${doc.id} in ${r.total} rows`;
   });
+
+  // Regression: same-document navigations (pushState / hash) re-fire
+  // framenavigated with the same loaderId; they used to open a new nav row, so
+  // the default scope dropped everything the document had loaded so far.
+  await t("network_list:same-document-nav", async () => {
+    await callTool("page_navigate", { url: state.seedUrl });
+    const w = sc(await callTool("network_wait_for", { urlContains: "api/data", timeoutMs: 8000 }));
+    assert(w.matched === true, "seed api/data request not captured");
+    sc(await callTool("script_evaluate", { expression: "history.pushState({}, '', '#x'); location.hash = 'y'; 1" }));
+    sc(await callTool("script_evaluate", {
+      expression: "fetch('https://tool-smoke.test/api/after-push').then((r) => r.status)",
+    }));
+    const w2 = sc(await callTool("network_wait_for", { urlContains: "api/after-push", timeoutMs: 8000 }));
+    assert(w2.matched === true, "after-push request not captured");
+    const r = sc(await callTool("network_list", { pageSize: 50 }));
+    const urls = (r.rows ?? []).map((x) => x.url);
+    assert((r.rows ?? []).some((x) => x.url === state.seedUrl && x.resourceType === "document"), `document missing: ${urls.join(", ")}`);
+    assert(urls.some((u) => u.includes("api/data")), `seed api/data missing: ${urls.join(", ")}`);
+    assert(urls.some((u) => u.includes("api/after-push")), `after-push missing: ${urls.join(", ")}`);
+    return `${r.total} rows incl. doc + api/data + after-push`;
+  });
 }
