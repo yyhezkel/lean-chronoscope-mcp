@@ -129,6 +129,20 @@ console/network/snapshot history is readable); a title matching nothing starts a
 new session carrying that title (attach-or-create). See "MCP client integration"
 for the `x-lc-session` reconnect header and the `assertSafeSessionId` traversal guard.
 
+**Page-level reaper:** each tick, in every surviving session, the reaper also
+closes pages idle past `PAGE_IDLE_MS` and, beyond that, the oldest-idle pages
+over `MAX_PAGES_PER_SESSION`. It never closes the selected page or a page with an
+RPC in flight, skips a session whose lock is held, and closes under that lock.
+Each page tracks `lastActivity`/`inFlight` (target = `pageId ?? selectedPageId`).
+
+**Per-session serialization:** RPCs that mutate browser/page state (`page.*`
+incl. evaluate, `input.*`, `emulate.*`, `intercept.add/remove`, `cookies.set/clear`,
+`storage.set/remove/clear`, `indexeddb.clear`, `screenshot.take`, `snapshot.take`)
+run under a per-session FIFO mutex (`Session.lock`, `src/shared/mutex.ts`;
+allowlist `LOCKED_METHODS` in `rpc-handlers.ts`), so un-awaited calls (navigate →
+snapshot) keep their order. `wait.for` / `network.wait_for`, read-only queries and
+`session.close` deliberately bypass it.
+
 Session DBs open with
 `auto_vacuum=INCREMENTAL` + `wal_autocheckpoint=1000` + `journal_size_limit=64MB`,
 and `wal_checkpoint(TRUNCATE)` runs on clean close so the persisted `db.sqlite`
@@ -145,6 +159,8 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_MAX_CONSOLE` | `50000` | keep newest N console rows per session |
 | `LEAN_CHRONOSCOPE_MAX_NETWORK` | `50000` | keep newest N network rows per session |
 | `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` | `10` | keep newest N snapshots per page |
+| `LEAN_CHRONOSCOPE_PAGE_IDLE_MS` | `900000` (15min) | reaper closes non-selected pages idle longer than this; `0` disables |
+| `LEAN_CHRONOSCOPE_MAX_PAGES_PER_SESSION` | `20` | reaper closes oldest-idle non-selected pages beyond this cap; `0` disables |
 | `LEAN_CHRONOSCOPE_FONT_WATCH` | `1` | auto-restart daemon when fonts change in `FONTS_DIR`; `0` disables |
 | `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |

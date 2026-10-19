@@ -3,6 +3,7 @@ import { nextPageId, assertSafeSessionId } from "@shared/ids.js";
 import { DaemonError } from "@shared/errors.js";
 import { env } from "@shared/env.js";
 import { getLogger } from "@shared/logger.js";
+import { Mutex } from "@shared/mutex.js";
 import type { SessionSource } from "@shared/protocol.js";
 import { openSessionDb, type SessionDb } from "./storage/db.js";
 import { sessionSizeBytes } from "./storage/size.js";
@@ -31,6 +32,10 @@ export interface PageState {
    *  was unavailable) — used to spot same-document navigations. */
   currentLoaderId: string | null;
   cleanupListeners: Array<() => void>;
+  /** ms of the last non-passive RPC targeting this page; drives page reaping. */
+  lastActivity: number;
+  /** Count of currently-executing RPCs targeting this page — never reaped when >0. */
+  inFlight: number;
 }
 
 export interface Session {
@@ -54,6 +59,9 @@ export interface Session {
   writer: SessionWriter;
   reader: SessionReader;
   intercept: InterceptionEngine;
+  /** Serializes RPCs that mutate browser/page state (see LOCKED_METHODS in
+   *  rpc-handlers.ts); the page reaper also closes pages under it. */
+  lock: Mutex;
 }
 
 export class SessionRegistry {
@@ -123,6 +131,7 @@ export class SessionRegistry {
       writer,
       reader,
       intercept: new InterceptionEngine(sessionId, this.broadcaster),
+      lock: new Mutex(),
     };
     this.sessions.set(sessionId, session);
     this.registry?.upsertOpen({
@@ -160,6 +169,8 @@ export class SessionRegistry {
       currentNavId: null,
       currentLoaderId: null,
       cleanupListeners: [],
+      lastActivity: Date.now(),
+      inFlight: 0,
     };
 
     await this.attachCollectorsAndNavTracking(session, state);
@@ -256,7 +267,9 @@ export class SessionRegistry {
    * Periodic lifecycle tick (called by the daemon's reaper interval):
    *   1. refresh each live session's cached size + flush stats to the registry,
    *   2. prune old rows to bound in-session growth (only when idle of RPCs),
-   *   3. evict sessions that are idle past IDLE_MS or over SIZE_CAP_BYTES.
+   *   3. evict sessions that are idle past IDLE_MS or over SIZE_CAP_BYTES,
+   *   4. in surviving sessions, close pages idle past PAGE_IDLE_MS and enforce
+   *      MAX_PAGES_PER_SESSION (see reapPages).
    * Evict == free the BrowserContext + memory (closeSession); the on-disk dir is
    * left for the age sweep. All per-session work is wrapped so one bad session
    * never stalls the sweep.
@@ -302,6 +315,70 @@ export class SessionRegistry {
         log.warn({ err, sessionId: s.id }, "reaper evict failed");
       }
     }
+
+    // Evicted sessions are gone from the map by now, so this only visits survivors.
+    const pageIdleMs = Number(env("PAGE_IDLE_MS") ?? 15 * 60_000);
+    const maxPages = Number(env("MAX_PAGES_PER_SESSION") ?? 20);
+    if (pageIdleMs <= 0 && maxPages <= 0) return;
+    for (const s of Array.from(this.sessions.values())) {
+      try {
+        await this.reapPages(s, pageIdleMs, maxPages);
+      } catch (err) {
+        log.warn({ err, sessionId: s.id }, "reaper page sweep failed");
+      }
+    }
+  }
+
+  /**
+   * Close a session's idle pages (idle >= pageIdleMs) and, beyond that, the
+   * oldest-idle pages over the maxPages cap. Never closes the selected page or
+   * one with an RPC in flight. Skips the session entirely while its lock is
+   * held/queued; otherwise runs under the lock so no mutating RPC can start on
+   * a page mid-close. Guards are re-checked inside the lock.
+   */
+  private async reapPages(s: Session, pageIdleMs: number, maxPages: number): Promise<void> {
+    if (s.lock.isLocked) return;
+    const pick = (): Array<{ ps: PageState; reason: string }> => {
+      const now = Date.now();
+      const closable = Array.from(s.pages.values())
+        .filter((ps) => ps.pageId !== s.selectedPageId && ps.inFlight === 0)
+        .sort((a, b) => a.lastActivity - b.lastActivity);
+      const out: Array<{ ps: PageState; reason: string }> = [];
+      const picked = new Set<string>();
+      if (pageIdleMs > 0) {
+        for (const ps of closable) {
+          if (now - ps.lastActivity >= pageIdleMs) {
+            out.push({ ps, reason: "idle" });
+            picked.add(ps.pageId);
+          }
+        }
+      }
+      if (maxPages > 0) {
+        let excess = s.pages.size - out.length - maxPages;
+        for (const ps of closable) {
+          if (excess <= 0) break;
+          if (picked.has(ps.pageId)) continue;
+          out.push({ ps, reason: "over-cap" });
+          excess--;
+        }
+      }
+      return out;
+    };
+    if (pick().length === 0) return;
+    await s.lock.run(async () => {
+      if (this.sessions.get(s.id) !== s) return; // closed while we waited
+      for (const { ps, reason } of pick()) {
+        log.info(
+          { sessionId: s.id, pageId: ps.pageId, reason, idleMs: Date.now() - ps.lastActivity },
+          "reaper closing idle page",
+        );
+        try {
+          await ps.page.close(); // 'close' handler disposes + marks the row closed
+        } catch (err) {
+          log.warn({ err, sessionId: s.id, pageId: ps.pageId }, "reaper page close failed");
+        }
+      }
+    });
   }
 
   /** Re-check the guards under fresh state, then evict. */

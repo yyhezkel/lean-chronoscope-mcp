@@ -155,6 +155,56 @@ const PASSIVE_METHODS: ReadonlySet<string> = new Set([
   "resources.unsubscribe",
 ]);
 
+/**
+ * RPCs that touch browser/page state and so run under the per-session lock
+ * (`Session.lock`), one at a time in arrival order. Without it, a client that
+ * fires `page.navigate` + `snapshot.take` without awaiting can see "no selected
+ * page", and two concurrent navigates on a page-less session create two pages.
+ * Deliberately NOT locked:
+ *  - `wait.for` / `network.wait_for` — long polls (up to 120s) that must not
+ *    block the very actions they wait on;
+ *  - read-only DB queries (console/network list/get/search, snapshot.diff) and
+ *    read-only page probes (page.list, cookies.list, storage.get/list,
+ *    indexeddb.list_databases/query, performance.metrics, intercept.list);
+ *  - PASSIVE_METHODS, incl. `session.close`: closing mid-op just makes the
+ *    locked op fail with a target-closed error, which is acceptable (and a
+ *    close must never queue behind a hung navigate).
+ * A hung holder can't deadlock the queue: every locked op is bounded by its own
+ * puppeteer timeout (goto/waitFor defaults).
+ */
+const LOCKED_METHODS: ReadonlySet<string> = new Set([
+  "page.new",
+  "page.navigate",
+  "page.select",
+  "page.close",
+  "page.back",
+  "page.forward",
+  "page.reload",
+  "page.evaluate",
+  "input.click",
+  "input.hover",
+  "input.type",
+  "input.fill_form",
+  "input.key",
+  "input.scroll",
+  "input.drag",
+  "input.upload_file",
+  "emulate.viewport",
+  "emulate.useragent",
+  "emulate.network",
+  "emulate.geolocation",
+  "intercept.add",
+  "intercept.remove",
+  "cookies.set",
+  "cookies.clear",
+  "storage.set",
+  "storage.remove",
+  "storage.clear",
+  "indexeddb.clear",
+  "screenshot.take",
+  "snapshot.take",
+]);
+
 function sizeOfFile(p: string): number {
   try {
     return fs.statSync(p).size;
@@ -195,21 +245,38 @@ export class RpcDispatcher {
 
   async dispatch(method: DaemonMethod, params: unknown, ctx?: ConnectionContext): Promise<unknown> {
     // Touch last-activity + hold an in-flight guard so the reaper never evicts a
-    // session mid-RPC. Two integer writes on a Map hit — no disk, no error
-    // swallowing (try/finally, not try/catch).
-    const sid = (params as { sessionId?: string } | undefined)?.sessionId;
-    const sess = sid ? this.sessions.sessions.get(sid) : undefined;
+    // session (or closes a page) mid-RPC. Integer writes on a Map hit — no disk,
+    // no error swallowing (try/finally, not try/catch).
+    const p = params as { sessionId?: string; pageId?: string } | undefined;
+    const sid = p?.sessionId;
+    let sess = sid ? this.sessions.sessions.get(sid) : undefined;
+    const locked = LOCKED_METHODS.has(method);
+    // page.new / page.navigate ensure the session themselves; do it up front so
+    // their lock exists even for a not-yet-created (or evicted) session.
+    if (!sess && sid && (method === "page.new" || method === "page.navigate")) {
+      sess = (await this.sessions.ensure(sid)).session;
+    }
+    // Target page = explicit pageId, else the selected one at arrival time.
+    const pid = p?.pageId ?? sess?.selectedPageId ?? undefined;
+    const page = pid ? sess?.pages.get(pid) : undefined;
     if (sess) {
       // Lifecycle/meta RPCs are not browser activity: a client that merely
       // connects (session.ensure) or polls status must not keep an otherwise
       // idle shared session alive forever.
-      if (!PASSIVE_METHODS.has(method)) sess.lastActivity = Date.now();
+      if (!PASSIVE_METHODS.has(method)) {
+        const now = Date.now();
+        sess.lastActivity = now;
+        if (page) page.lastActivity = now;
+      }
       sess.inFlight++;
     }
+    if (page) page.inFlight++;
     try {
+      if (sess && locked) return await sess.lock.run(() => this.dispatchInner(method, params, ctx));
       return await this.dispatchInner(method, params, ctx);
     } finally {
       if (sess) sess.inFlight--;
+      if (page) page.inFlight--;
     }
   }
 
