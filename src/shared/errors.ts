@@ -30,8 +30,8 @@ export class DaemonError extends Error {
     return new DaemonError(ErrorCode.PAGE_NOT_FOUND, `Page not found: ${pageId}`);
   }
 
-  static browserDisconnected(): DaemonError {
-    return new DaemonError(ErrorCode.BROWSER_DISCONNECTED, "Chrome is not connected");
+  static browserDisconnected(message = "Chrome is not connected"): DaemonError {
+    return new DaemonError(ErrorCode.BROWSER_DISCONNECTED, message);
   }
 
   static internal(message: string, data?: unknown): DaemonError {

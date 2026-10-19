@@ -35,10 +35,13 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
   reconcileRegistry(registry, config.dataDir);
   runRetentionSweep(config.dataDir, registry);
 
-  const browser = await launchBrowser({
+  const browserOpts = {
     executablePath: config.chromeBin,
     headless: config.headless ?? true,
-  });
+  };
+  // `let`: swapped by the in-process relaunch below; shutdown() always closes /
+  // SIGKILLs whichever instance is current.
+  let browser = await launchBrowser(browserOpts);
 
   const broadcaster = new Broadcaster();
   const subscriptions = new SubscriptionRegistry(broadcaster);
@@ -157,12 +160,61 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  browser.on("disconnected", () => {
-    if (!shuttingDown) {
-      log.error("Chrome disconnected unexpectedly — exiting for supervisor to restart");
-      void shutdown("BROWSER_DISCONNECT");
+
+  // Chrome crash recovery: relaunch in-process instead of exiting, so the
+  // daemon, its sockets/HTTP bridge, MCP connections and session DBs all
+  // survive. Sessions are rebound to the new browser (fresh BrowserContext,
+  // pages dropped, intercept rules kept — see SessionRegistry.rebind). While
+  // relaunching, the dispatcher gates browser-touching RPCs. Only if every
+  // attempt fails do we fall back to exiting for Docker to restart us.
+  let relaunching = false;
+  const relaunchDelaysMs = [1_000, 3_000, 9_000];
+  const onDisconnected = (from: typeof browser) => {
+    if (shuttingDown || relaunching || from !== browser) return; // stale / already handled
+    relaunching = true;
+    dispatcher.beginRelaunch();
+    log.error("Chrome disconnected — relaunching in-process");
+    // Make sure the old process is really gone (pipe can break with it alive).
+    try {
+      from.process()?.kill("SIGKILL");
+    } catch {
+      /* already dead */
     }
-  });
+    void (async () => {
+      for (let i = 0; i < relaunchDelaysMs.length; i++) {
+        await new Promise((r) => setTimeout(r, relaunchDelaysMs[i]));
+        if (shuttingDown) break;
+        const attempt = i + 1;
+        log.info({ attempt, of: relaunchDelaysMs.length }, "Chrome relaunch attempt");
+        try {
+          const next = await launchBrowser(browserOpts);
+          if (shuttingDown) {
+            await next.close().catch(() => next.process()?.kill("SIGKILL"));
+            break;
+          }
+          browser = next;
+          next.on("disconnected", () => onDisconnected(next));
+          await dispatcher.replaceBrowser(next);
+          // Its own disconnect would have been swallowed by the `relaunching` guard.
+          if (!next.connected) throw new Error("relaunched Chrome died during rebind");
+          relaunching = false;
+          dispatcher.endRelaunch();
+          log.info({ attempt }, "Chrome relaunched in-process — sessions rebound");
+          return;
+        } catch (err) {
+          log.error({ err, attempt }, "Chrome relaunch attempt failed");
+        }
+      }
+      relaunching = false;
+      dispatcher.endRelaunch();
+      if (!shuttingDown) {
+        log.error("Chrome relaunch failed — exiting for supervisor to restart");
+        void shutdown("BROWSER_DISCONNECT");
+      }
+    })();
+  };
+  const first = browser;
+  first.on("disconnected", () => onDisconnected(first));
 
   // Optional HTTP+SSE bridge — only when explicitly enabled via env. Imports
   // are dynamic so the daemon doesn't pay the SDK transport cost in the common
