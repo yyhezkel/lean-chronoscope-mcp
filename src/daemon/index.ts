@@ -234,8 +234,6 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
         import("../mcp/http-bridge.js"),
         import("../mcp/daemon-client.js"),
       ]);
-      const httpDaemon = new DaemonClient(config.socketPath);
-      await httpDaemon.connect();
       const port = Number(env("HTTP_PORT") ?? 8780);
       const host = env("HTTP_HOST") ?? "127.0.0.1";
       const mode =
@@ -248,12 +246,20 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
         host,
         port,
         bearerToken: httpToken,
-        daemon: httpDaemon,
+        // One daemon connection per HTTP MCP session (closed with it), so
+        // per-connection resource subscriptions are released on disconnect.
+        connectDaemon: async () => {
+          const client = new DaemonClient(config.socketPath);
+          await client.connect();
+          return client;
+        },
         sessionId: () => `http-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         mode,
-        maxBodyBytes: Number(env("HTTP_MAX_BODY_BYTES") ?? 4 * 1024 * 1024),
-        ratePerMin: Number(env("HTTP_RATE_PER_MIN") ?? 600),
-        maxSessions: Number(env("HTTP_MAX_SESSIONS") ?? 64),
+        maxBodyBytes: envLimit("HTTP_MAX_BODY_BYTES", 4 * 1024 * 1024),
+        ratePerMin: envLimit("HTTP_RATE_PER_MIN", 60),
+        sessionRatePerMin: envLimit("HTTP_SESSION_RATE_PER_MIN", 600),
+        initRatePerMin: envLimit("HTTP_INIT_RATE_PER_MIN", 120),
+        maxSessions: envLimit("HTTP_MAX_SESSIONS", 64),
         tls: tlsCert && tlsKey ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) } : undefined,
       });
     } catch (err) {
@@ -262,6 +268,19 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
   }
 
   log.info({ socketPath: config.socketPath }, "daemon ready");
+}
+
+/**
+ * Read a non-negative numeric HTTP-bridge limit from env. A typo (NaN, negative)
+ * must not fail open into "no limit": log it and fall back to the default.
+ */
+function envLimit(name: string, def: number): number {
+  const raw = env(name);
+  if (raw === undefined || raw.trim() === "") return def;
+  const n = Number(raw);
+  if (Number.isFinite(n) && n >= 0) return n;
+  log.error({ name: `LEAN_CHRONOSCOPE_${name}`, value: raw, using: def }, "invalid numeric env — using default");
+  return def;
 }
 
 /**

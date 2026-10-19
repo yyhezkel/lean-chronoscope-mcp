@@ -35,8 +35,12 @@ export interface ResourceHandlersOptions {
  *
  * Static URIs (currently just `browser://docs/tools`) are rendered locally
  * from the MCP tool registry; everything else round-trips to the daemon.
+ *
+ * Returns a disposer that detaches the daemon notification listener — call it
+ * when the Server goes away, or the closed Server keeps receiving (and the
+ * client keeps referencing) every notification.
  */
-export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
+export function registerResourceHandlers(opts: ResourceHandlersOptions): () => void {
   const { server, daemon, sessionId, allTools } = opts;
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
@@ -96,7 +100,7 @@ export function registerResourceHandlers(opts: ResourceHandlersOptions): void {
   });
 
   // Daemon → MCP notification translation.
-  daemon.onNotification((notif) => {
+  return daemon.onNotification((notif) => {
     if (notif.method !== "resource.updated") return;
     const params = notif.params as { uri?: string } | undefined;
     const uri = params?.uri;

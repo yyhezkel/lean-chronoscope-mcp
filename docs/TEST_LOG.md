@@ -272,3 +272,19 @@ Default env — `LC_CONTAINER=lc-test-d node scripts/test-all-tools.mjs` — Sum
 - smoke-test-v17-screencast ..................................... PASS
 - smoke-test-m2-mcp ............................................. PASS
 - smoke-test-http-bridge (plain http) ........................... PASS
+
+---
+
+## 2026-10-19 — review/R1-bridge (per-session daemon client, split rate buckets, env fail-closed)
+
+Container: `LC_CONTAINER=lc-r1 LC_TEST_PORT=18811 scripts/test-container.sh -e LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN=60`
+
+- pnpm typecheck && pnpm build .................................. PASS
+- smoke-test-http-bridge (`LC_CONTAINER=lc-r1 LC_HTTP_URL=http://127.0.0.1:18811`) ... PASS
+  - shared screencast: A 1 / B 1 updates; A unsubscribed → B 5 updates in 2.5s, A 0; B DELETE → "screencast stopped"
+  - per-session burst of 910 → 296×429, 614×200; session B unaffected
+  - bad-token burst of 70 → 10×429 (Retry-After 1), 60×401; live session OK during lockout; new initialize → 429
+- 20 never-initialized POSTs → daemon-socket fd count unchanged (90 → 90); /health sessions 0 after smoke
+- invalid env (`HTTP_RATE_PER_MIN=6O0`, `HTTP_MAX_SESSIONS=-1`) → error logged, defaults 60 / 64 used
+- smoke-test-v17-screencast (stdio) ............................. PASS
+- test-all-tools ................................................ 58/58 PASS

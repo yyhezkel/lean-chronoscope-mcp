@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // HTTP-bridge hardening smoke, over real HTTP(S) against a running bridge:
 //   /health 200 · bad token 401 · initialize + tools/list · body > cap → 413
-//   (declared Content-Length and chunked) · burst over the rate limit → 429.
+//   (declared Content-Length and chunked) · rate limits in separate buckets:
+//   per-session burst → 429 without affecting another session; bad-token burst
+//   → 429 per IP while a live session keeps working (new initialize is
+//   refused until the IP refills). Shared screencast subscription: two HTTP
+//   clients pinned to one daemon session (x-lc-session) subscribe to the same
+//   screencast URI; A unsubscribes → B still gets updates; B disconnects
+//   (DELETE) without unsubscribing → daemon logs "screencast stopped".
 // TLS mode (URL starts with https://): same checks with rejectUnauthorized:false,
 // plus "plain http:// to the same port fails".
 //
@@ -9,15 +15,20 @@
 // test-token), LC_MAX_BODY (default 4 MiB, must match the bridge),
 // LC_RATE_PER_MIN (bridge's HTTP_RATE_PER_MIN; burst check skipped when 0),
 // LC_MAX_SESSIONS (bridge's HTTP_MAX_SESSIONS; when set, fills the cap and
-// expects 503 on the next initialize).
+// expects 503 on the next initialize), LC_SESSION_RATE_PER_MIN (bridge's
+// HTTP_SESSION_RATE_PER_MIN, default 600; 0 skips), LC_CONTAINER (when set,
+// the screencast check also greps the daemon log via `docker exec`).
 import http from "node:http";
 import https from "node:https";
+import { execFileSync } from "node:child_process";
 
 const BASE = (process.env.LC_HTTP_URL ?? "http://127.0.0.1:18803").replace(/\/$/, "");
 const TOKEN = process.env.LC_HTTP_TOKEN ?? "test-token";
 const MAX_BODY = Number(process.env.LC_MAX_BODY ?? 4 * 1024 * 1024);
 const RATE = Number(process.env.LC_RATE_PER_MIN ?? 60);
 const MAX_SESSIONS = Number(process.env.LC_MAX_SESSIONS ?? 0);
+const SESSION_RATE = Number(process.env.LC_SESSION_RATE_PER_MIN ?? 600);
+const CONTAINER = process.env.LC_CONTAINER;
 const TLS = BASE.startsWith("https:");
 
 const ok = (c, l) => { if (c) console.log(`  ✓ ${l}`); else { console.log(`  ✗ ${l}`); process.exitCode = 1; } };
@@ -69,7 +80,89 @@ function rpcResult(text) {
   throw new Error(`unparseable reply: ${trimmed.slice(0, 200)}`);
 }
 
-console.log(`# http-bridge smoke (${BASE}, tls=${TLS}, rate=${RATE}/min)`);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred, timeoutMs) {
+  const t = Date.now();
+  while (Date.now() - t < timeoutMs) { if (pred()) return true; await sleep(50); }
+  return pred();
+}
+
+/**
+ * Tiny Streamable-HTTP MCP client. Request replies come back on the POST
+ * (JSON or SSE); server-initiated notifications unrelated to a request
+ * (resources/updated) only go to the standalone GET SSE stream, so `listen()`
+ * opens that stream and collects them.
+ */
+class McpHttpClient {
+  constructor(extraHeaders = {}) { this.extra = extraHeaders; this.nextId = 1; this.notifs = []; }
+  headers() {
+    return { ...mcpHeaders, ...this.extra, ...(this.sid ? { "mcp-session-id": this.sid, "mcp-protocol-version": "2025-03-26" } : {}) };
+  }
+  async init(name) {
+    const r = await request(`${BASE}/mcp`, {
+      method: "POST", headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name, version: "0" } } }),
+    });
+    this.sid = r.headers["mcp-session-id"];
+    if (r.status !== 200 || !this.sid) throw new Error(`initialize → ${r.status} ${r.text.slice(0, 200)}`);
+    await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+    return this;
+  }
+  async rpc(method, params = {}) {
+    const id = this.nextId++;
+    const r = await request(`${BASE}/mcp`, { method: "POST", headers: this.headers(), body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
+    if (r.status !== 200) throw new Error(`${method} → HTTP ${r.status} ${r.text.slice(0, 200)}`);
+    const msgs = r.text.trim().startsWith("{") ? [JSON.parse(r.text)]
+      : r.text.split("\n").filter((l) => l.startsWith("data:")).map((l) => JSON.parse(l.slice(5)));
+    const reply = msgs.find((m) => m.id === id);
+    if (!reply) throw new Error(`${method}: no reply in ${r.text.slice(0, 200)}`);
+    if (reply.error) throw new Error(`${method}: ${reply.error.message}`);
+    return reply.result;
+  }
+  listen() {
+    const u = new URL(`${BASE}/mcp`);
+    const mod = u.protocol === "https:" ? https : http;
+    return new Promise((resolve, reject) => {
+      this.sse = mod.request(u, { method: "GET", headers: { ...this.headers(), accept: "text/event-stream" }, rejectUnauthorized: false }, (res) => {
+        if (res.statusCode !== 200) { reject(new Error(`GET SSE → ${res.statusCode}`)); res.resume(); return; }
+        let buf = "";
+        res.on("data", (c) => {
+          buf += c.toString("utf8");
+          let i;
+          while ((i = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+            if (!line.startsWith("data:")) continue;
+            try { this.notifs.push({ ...JSON.parse(line.slice(5)), at: Date.now() }); } catch { /* partial */ }
+          }
+        });
+        res.on("error", () => {});
+        resolve();
+      });
+      this.sse.on("error", () => {});
+      this.sse.end();
+    });
+  }
+  updates(uri, since = 0) {
+    return this.notifs.filter((n) => n.method === "notifications/resources/updated" && n.params?.uri === uri && n.at >= since);
+  }
+  async close() {
+    const r = await request(`${BASE}/mcp`, { method: "DELETE", headers: this.headers() });
+    this.sse?.destroy();
+    return r.status;
+  }
+}
+
+function daemonLogCount(needle) {
+  const out = execFileSync(
+    "docker",
+    ["exec", CONTAINER, "sh", "-c", 'cat "${LEAN_CHRONOSCOPE_LOG_DIR:-/var/log/lean-chronoscope}"/*.log'],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 256 * 1024 * 1024 },
+  );
+  return out.split("\n").filter((l) => l.includes(`"msg":"${needle}"`)).length;
+}
+
+console.log(`# http-bridge smoke (${BASE}, tls=${TLS}, rate=${RATE}/min, sessionRate=${SESSION_RATE}/min)`);
 
 const health = await request(`${BASE}/health`);
 ok(health.status === 200 && JSON.parse(health.text).ok === true, `/health → ${health.status}`);
@@ -142,6 +235,80 @@ if (MAX_SESSIONS > 0) {
   }
 }
 
+{
+  // Two clients pinned to one daemon session share one screencast URI. Each HTTP
+  // MCP session has its own daemon connection, so A's unsubscribe must not end
+  // B's stream, and B's disconnect must release the CDP screencast.
+  console.log("# shared screencast subscription");
+  const shared = `smoke-http-cast-${Date.now()}`;
+  const ANIM_URL = "data:text/html," + encodeURIComponent(
+    `<style>@keyframes s{from{transform:translateX(0)}to{transform:translateX(300px)}}
+     #b{width:80px;height:80px;background:#c33;animation:s 1s linear infinite alternate}</style><div id="b"></div>`);
+  const a = await new McpHttpClient({ "x-lc-session": shared }).init("smoke-cast-a");
+  const b = await new McpHttpClient({ "x-lc-session": shared }).init("smoke-cast-b");
+  try {
+    await a.listen();
+    await b.listen();
+    const nav = await a.rpc("tools/call", { name: "page_navigate", arguments: { url: ANIM_URL } });
+    ok(!nav.isError, "page_navigate (animated data: URL) via tools/call");
+    const listed = await b.rpc("resources/list");
+    const castUri = listed.resources.map((r) => r.uri).find((u) => /^browser:\/\/session\/[^/]+\/page\/[^/]+\/screencast$/.test(u));
+    ok(!!castUri && castUri.includes(`/session/${shared}/`), `screencast URI listed: ${castUri}`);
+    const startedBefore = CONTAINER ? daemonLogCount("screencast started") : 0;
+    const t0 = Date.now();
+    await a.rpc("resources/subscribe", { uri: castUri });
+    await b.rpc("resources/subscribe", { uri: castUri });
+    await waitFor(() => a.updates(castUri, t0).length >= 1 && b.updates(castUri, t0).length >= 1, 5000);
+    ok(a.updates(castUri, t0).length >= 1 && b.updates(castUri, t0).length >= 1,
+      `both subscribed → A ${a.updates(castUri, t0).length}, B ${b.updates(castUri, t0).length} updates`);
+    if (CONTAINER) ok(daemonLogCount("screencast started") === startedBefore + 1, "one CDP screencast for both subscribers");
+
+    await a.rpc("resources/unsubscribe", { uri: castUri });
+    await sleep(700); // drain in-flight emits
+    const t1 = Date.now();
+    await sleep(2500);
+    ok(b.updates(castUri, t1).length >= 1, `A unsubscribed → B still gets updates (${b.updates(castUri, t1).length} in 2.5s)`);
+    ok(a.updates(castUri, t1).length === 0, `A gets none after unsubscribe (${a.updates(castUri, t1).length})`);
+
+    const stoppedBefore = CONTAINER ? daemonLogCount("screencast stopped") : 0;
+    const delB = await b.close(); // no unsubscribe first
+    ok(delB === 200 || delB === 204, `B DELETE without unsubscribe → ${delB}`);
+    if (CONTAINER) {
+      await waitFor(() => daemonLogCount("screencast stopped") > stoppedBefore, 5000);
+      ok(daemonLogCount("screencast stopped") > stoppedBefore, "daemon logged 'screencast stopped' after B disconnected");
+    } else {
+      console.log("  - (set LC_CONTAINER to check the daemon log for 'screencast stopped')");
+    }
+    const still = await a.rpc("tools/list");
+    ok(still.tools?.length > 0, "A still usable after B left (shared daemon session kept)");
+  } finally {
+    await a.close().catch(() => {});
+    await b.close().catch(() => {});
+  }
+}
+
+if (SESSION_RATE > 0) {
+  // Authenticated requests are bucketed per MCP session: exhausting A's bucket
+  // must not affect B, even though both come from the same IP.
+  console.log("# per-session rate limit");
+  const a = await new McpHttpClient().init("smoke-rate-a");
+  const b = await new McpHttpClient().init("smoke-rate-b");
+  try {
+    // Overshoot generously: the bucket refills at rate/60 per second while the burst runs.
+    const n = Math.ceil(SESSION_RATE * 1.5) + 10;
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/list" });
+    const results = await Promise.all(Array.from({ length: n }, () =>
+      request(`${BASE}/mcp`, { method: "POST", headers: a.headers(), body })));
+    const limited = results.filter((r) => r.status === 429).length;
+    ok(limited > 0, `session A burst of ${n} → ${limited}×429, ${results.filter((r) => r.status === 200).length}×200`);
+    const bList = await b.rpc("tools/list").then((r) => r.tools.length, (e) => e.message);
+    ok(typeof bList === "number", `session B unaffected → tools/list ${bList} tools`);
+  } finally {
+    await a.close().catch(() => {});
+    await b.close().catch(() => {});
+  }
+}
+
 if (TLS) {
   const plain = BASE.replace(/^https:/, "http:");
   const r = await request(`${plain}/health`).then((x) => `status ${x.status}`, (err) => `error ${err.code ?? err.message}`);
@@ -149,7 +316,10 @@ if (TLS) {
 }
 
 if (RATE > 0) {
-  // Burst with a bad token: also proves failed auth attempts are throttled.
+  // Burst with a bad token: failed auth attempts are throttled per IP. A live
+  // session (opened before the flood) must keep working through it.
+  console.log("# failed-auth rate limit");
+  const liveClient = await new McpHttpClient().init("smoke-live");
   const n = RATE + 10;
   const results = await Promise.all(
     Array.from({ length: n }, () =>
@@ -161,6 +331,11 @@ if (RATE > 0) {
     `burst of ${n} → ${limited.length}×429 (Retry-After ${limited[0]?.headers["retry-after"]}), ${results.filter((r) => r.status === 401).length}×401`);
   const h = await request(`${BASE}/health`);
   ok(h.status === 200, `/health not rate limited → ${h.status}`);
+  const during = await liveClient.rpc("tools/list").then((r) => r.tools.length, (e) => e.message);
+  ok(typeof during === "number", `live session during bad-token lockout → tools/list ${during} tools`);
+  const fresh = await initialize();
+  ok(fresh.status === 429, `new initialize from the locked-out IP → ${fresh.status} (until the bucket refills)`);
+  ok((await liveClient.close()) === 200, "live session DELETE");
 }
 
 console.log(process.exitCode ? "FAIL" : "PASS");

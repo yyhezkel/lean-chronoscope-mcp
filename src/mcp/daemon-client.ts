@@ -24,6 +24,7 @@ export class DaemonClient {
   private pending = new Map<number | string, Pending>();
   private notificationHandlers: NotificationHandler[] = [];
   private connected = false;
+  private closedByUs = false;
 
   constructor(private readonly socketPath: string) {}
 
@@ -60,11 +61,16 @@ export class DaemonClient {
     });
   }
 
-  onNotification(handler: NotificationHandler): void {
+  /** Register a notification handler; returns a disposer that removes it. */
+  onNotification(handler: NotificationHandler): () => void {
     this.notificationHandlers.push(handler);
+    return () => {
+      this.notificationHandlers = this.notificationHandlers.filter((h) => h !== handler);
+    };
   }
 
   close(): void {
+    this.closedByUs = true;
     if (this.socket) {
       this.socket.end();
       this.socket = null;
@@ -114,6 +120,8 @@ export class DaemonClient {
     const err = new Error("daemon connection closed");
     for (const p of this.pending.values()) p.reject(err);
     this.pending.clear();
-    log.warn("daemon socket closed");
+    // The HTTP bridge closes one client per MCP session — that's routine.
+    if (this.closedByUs) log.debug("daemon socket closed");
+    else log.warn("daemon socket closed");
   }
 }
