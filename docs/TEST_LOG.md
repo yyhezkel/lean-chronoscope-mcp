@@ -157,3 +157,24 @@ Summary: **6/6 PASS**
 - `docker stop` → "daemon stopped", exit 0 .......................... PASS
 
 Summary: **5/5 PASS** (shutdown-timeout SIGKILL path not exercised)
+
+---
+
+## 2026-10-19 — nav-scope document attribution + quiet intercept detach (e2e, test container lc-test-b)
+
+- `node scripts/test-all-tools.mjs` ............................................ 58/58 PASS
+- network_list:document-after-navigate (no filters → seed document row present) . PASS
+- daemon log after page_close: 0 × "intercept client detach failed" ............. PASS
+
+Summary: **58/58 PASS** + new assertion PASS
+
+---
+
+## 2026-10-19 — same-document navs keep the current nav row (e2e, test container lc-test-b)
+
+- `node scripts/test-all-tools.mjs` ............................................ 58/58 PASS
+- network_list:document-after-navigate ......................................... PASS
+- network_list:same-document-nav (pushState+hash, then fetch → doc + api/data + after-push all in default scope) . PASS
+- navigations table: one row per loaderId, same-doc row url updated to `#y` ...... PASS
+
+Summary: **58/58 PASS** + 2 regression assertions PASS

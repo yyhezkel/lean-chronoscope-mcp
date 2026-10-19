@@ -27,6 +27,9 @@ export interface PageState {
   snapshot: SnapshotService;
   /** SQLite id of the currently-active navigation (null until first nav). */
   currentNavId: number | null;
+  /** CDP loaderId of `currentNavId` (null until first nav, or if the loader id
+   *  was unavailable) — used to spot same-document navigations. */
+  currentLoaderId: string | null;
   cleanupListeners: Array<() => void>;
 }
 
@@ -155,6 +158,7 @@ export class SessionRegistry {
       collectors: [],
       snapshot: new SnapshotService(page),
       currentNavId: null,
+      currentLoaderId: null,
       cleanupListeners: [],
     };
 
@@ -349,7 +353,25 @@ export class SessionRegistry {
     // Track main-frame navigations → write nav rows + propagate to collectors.
     const onFrameNav = (frame: Frame) => {
       if (frame !== state.page.mainFrame()) return;
-      const loaderId = (frame as any)._loaderId ?? `loader_${Date.now()}`;
+      const realLoaderId = (frame as any)._loaderId as string | undefined;
+      // Same-document navigations (pushState / hash change) re-fire
+      // framenavigated with the *same* loaderId: it's still the same document,
+      // so keep the current nav (and its request attribution) and just track
+      // the url. Only dedupe on a real loader id — the synthetic fallback below
+      // is unique per call and must never match.
+      if (realLoaderId && state.currentNavId != null && realLoaderId === state.currentLoaderId) {
+        try {
+          session.writer.updateNavigationUrl(state.currentNavId, frame.url());
+        } catch (err) {
+          log.warn({ err }, "update navigation url failed");
+        }
+        this.broadcast(
+          buildUri({ kind: "page.url", sessionId: session.id, pageId: state.pageId }),
+          "url",
+        );
+        return;
+      }
+      const loaderId = realLoaderId ?? `loader_${Date.now()}`;
       try {
         const navId = session.writer.insertNavigation({
           pageId: state.pageId,
@@ -357,6 +379,7 @@ export class SessionRegistry {
           url: frame.url(),
         });
         state.currentNavId = navId;
+        state.currentLoaderId = realLoaderId ?? null;
         for (const c of state.collectors) c.setCurrentNav(navId);
       } catch (err) {
         log.warn({ err }, "insert navigation row failed");

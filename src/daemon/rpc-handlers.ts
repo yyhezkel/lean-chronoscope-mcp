@@ -355,14 +355,22 @@ export class RpcDispatcher {
   private resolveNavScope(
     session: Session,
     params: { pageId?: string; navId?: number; includePreserved?: boolean },
-  ): { pageId?: string; navId?: number } {
-    if (params.navId != null) return { pageId: params.pageId, navId: params.navId };
+  ): { pageId?: string; navId?: number; navLoaderId?: string } {
+    if (params.navId != null) {
+      const loader = session.reader.getNavLoaderId(params.navId);
+      return { pageId: params.pageId, navId: params.navId, navLoaderId: loader ?? undefined };
+    }
     if (params.includePreserved) return { pageId: params.pageId };
-    // Default: latest nav of the selected/specified page only.
+    // Default: latest nav of the selected/specified page only. The loader id
+    // rides along so network.list can claim that nav's document request (it's
+    // captured before framenavigated stamps the new nav id). Console/exception
+    // rows need no such fix-up: the new document can't run script (or log)
+    // before it commits, and commit is what fires framenavigated — anything
+    // logged in the gap is the old page's unload output, correctly old-nav.
     if (!params.pageId && !session.selectedPageId) return {};
     const pid = params.pageId ?? session.selectedPageId!;
-    const navs = session.reader.getNavIdsForPage(pid, 1);
-    return navs.length ? { pageId: pid, navId: navs[0] } : { pageId: pid };
+    const nav = session.reader.getLatestNav(pid);
+    return nav ? { pageId: pid, navId: nav.id, navLoaderId: nav.loaderId } : { pageId: pid };
   }
 
   // --- handlers ---
@@ -672,6 +680,7 @@ export class RpcDispatcher {
     const { rows, total } = session.reader.listNetwork({
       pageId: scope.pageId,
       navId: scope.navId,
+      navLoaderId: scope.navLoaderId,
       sinceTs: params.sinceTs,
       hideStatic: params.hideStatic,
       urlContains: params.urlContains,
