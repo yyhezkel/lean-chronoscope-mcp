@@ -55,6 +55,10 @@ before. Session ids from untrusted callers (this header, and `session_attach`'s
 which rejects ids containing `/`, `\`, `..`, NUL, or that are empty / >200 chars —
 an id becomes a filesystem path, so this prevents traversal out of the sessions dir.
 
+Bridge hardening: constant-time bearer compare, 4 MiB body cap (413), per-IP
+rate limit (429, counts failed auth), concurrent-session cap (503), and optional
+built-in TLS — see the tunables table below. Smoke: `scripts/smoke-test-http-bridge.mjs`.
+
 The bearer token lives in
 `docker/docker-compose.yml` (`LEAN_CHRONOSCOPE_HTTP_TOKEN`, legacy
 `BROWSER_MCP_HTTP_TOKEN` still honored); rotate it there + in the
@@ -144,6 +148,10 @@ Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honor
 | `LEAN_CHRONOSCOPE_FONT_WATCH` | `1` | auto-restart daemon when fonts change in `FONTS_DIR`; `0` disables |
 | `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
+| `LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | HTTP bridge POST body cap; larger → 413 |
+| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `600` | per-client-IP token bucket (burst = rate) on non-`/health` requests, incl. failed auth → 429 + `Retry-After`; `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS` | `64` | max concurrent HTTP MCP transports; new sessions beyond → 503; `0` = unlimited |
+| `LEAN_CHRONOSCOPE_HTTP_TLS_CERT` / `_TLS_KEY` | (unset) | PEM file paths; both set → bridge serves HTTPS; only one set → bridge refuses to start (fail closed) |
 | `LEAN_CHRONOSCOPE_DATA_DIR` | `/var/lib/lean-chronoscope` | data root (sessions + `registry.sqlite`) |
 
 ## Tests

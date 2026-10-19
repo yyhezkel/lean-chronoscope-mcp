@@ -21,7 +21,7 @@ for v1.0.
 | Surface | Control |
 |---|---|
 | Unix socket | File perms `0660`; container/SSH boundary. |
-| HTTP+SSE bridge (opt-in) | Disabled unless `LEAN_CHRONOSCOPE_HTTP_TOKEN` set. Requires `Authorization: Bearer <token>`. Binds `127.0.0.1` by default — **never** `0.0.0.0` without a TLS-terminating proxy. No built-in TLS. |
+| HTTP+SSE bridge (opt-in) | Disabled unless `LEAN_CHRONOSCOPE_HTTP_TOKEN` set. Requires `Authorization: Bearer <token>`. Constant-time token compare (`timingSafeEqual` over SHA-256 digests — no length leak). Binds `127.0.0.1` by default — **never** expose it beyond loopback without TLS (built-in via `HTTP_TLS_CERT`/`_KEY`, or a TLS-terminating proxy). Half-configured TLS (only cert or only key) → bridge refuses to start. POST body cap (default 4 MiB → 413), per-client-IP token-bucket rate limit (default 600/min → 429 + `Retry-After`; failed auth attempts count, so token brute force is throttled; `/health` exempt), concurrent MCP-session cap (default 64 → 503). |
 | Process user | Container runs as non-root `mcp:1500`. |
 | Chrome flags | `--no-sandbox` (required in container) + `--disable-dev-shm-usage`; `shm_size: 2g`. |
 | Secret leakage in captures | 3-mode redaction (`src/shared/redact.ts`), default `external`: redacts Authorization/Cookie/API-key headers + token-shaped body values for non-trusted hosts. Applied in `network_get`. |
@@ -34,8 +34,11 @@ for v1.0.
 - **`network_list` summaries are not redacted** — only `network_get` is. URLs with
   inline credentials (`https://user:pass@host`) would appear in the list. Mitigation:
   redaction of list URLs is a follow-up; avoid credential-in-URL flows.
-- **HTTP bridge has no TLS and no rate limiting.** Intended for loopback or behind
-  a reverse proxy / SSH tunnel only.
+- **HTTP bridge rate limiting is keyed on the socket peer IP.** `X-Forwarded-For`
+  is deliberately not trusted, so behind a reverse proxy all clients share one
+  bucket — raise `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` (or rate-limit at the proxy).
+  Built-in TLS uses the PEM files as-is; there's no hot reload — restart the
+  container after rotating the cert.
 - **No per-tool authorization.** A connected client can run every tool, including
   `script_evaluate`-class power (via `page.evaluate` inside storage tools) and
   interception. Anyone with socket access has full browser control by design.
@@ -50,6 +53,10 @@ for v1.0.
 | `LEAN_CHRONOSCOPE_TRUSTED_DOMAINS` | `localhost,127.0.0.1,::1` | hosts treated as internal in `external` mode (extend with your own) |
 | `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | enables HTTP bridge; bearer token |
 | `LEAN_CHRONOSCOPE_HTTP_HOST` / `_PORT` | `127.0.0.1` / `8780` | HTTP bridge bind |
+| `LEAN_CHRONOSCOPE_HTTP_TLS_CERT` / `_TLS_KEY` | (unset) | PEM paths; both → HTTPS; only one → bridge not started |
+| `LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES` | `4194304` | POST body cap (413) |
+| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `600` | per-IP token bucket (429); `0` disables |
+| `LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS` | `64` | concurrent MCP transports (503); `0` = unlimited |
 | `LEAN_CHRONOSCOPE_RETENTION_DAYS` | `7` | session retention sweep |
 | `LEAN_CHRONOSCOPE_LOG_MAX_BYTES` / `_LOG_KEEP` | `10MB` / `5` | log rotation |
 

@@ -168,7 +168,15 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
   // are dynamic so the daemon doesn't pay the SDK transport cost in the common
   // stdio-only case.
   const httpToken = env("HTTP_TOKEN");
-  if (httpToken) {
+  const tlsCert = env("HTTP_TLS_CERT");
+  const tlsKey = env("HTTP_TLS_KEY");
+  if (httpToken && !!tlsCert !== !!tlsKey) {
+    // Fail closed: a half-configured TLS setup must not silently serve plain HTTP.
+    log.error(
+      { certSet: !!tlsCert, keySet: !!tlsKey },
+      "HTTP bridge NOT started: set both LEAN_CHRONOSCOPE_HTTP_TLS_CERT and _TLS_KEY (or neither)",
+    );
+  } else if (httpToken) {
     try {
       const [{ startHttpBridge }, { DaemonClient }] = await Promise.all([
         import("../mcp/http-bridge.js"),
@@ -191,6 +199,10 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
         daemon: httpDaemon,
         sessionId: () => `http-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         mode,
+        maxBodyBytes: Number(env("HTTP_MAX_BODY_BYTES") ?? 4 * 1024 * 1024),
+        ratePerMin: Number(env("HTTP_RATE_PER_MIN") ?? 600),
+        maxSessions: Number(env("HTTP_MAX_SESSIONS") ?? 64),
+        tls: tlsCert && tlsKey ? { cert: fs.readFileSync(tlsCert), key: fs.readFileSync(tlsKey) } : undefined,
       });
     } catch (err) {
       log.error({ err }, "failed to start HTTP bridge — continuing without it");

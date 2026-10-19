@@ -33,7 +33,7 @@ export const sessionList = defineTool({
 export const sessionNew = defineTool({
   name: "session_new",
   description:
-    "Ensure a session exists and open its first page. Note: this MCP connection is bound to its own session id; `session_new` is mainly for pre-creating other sessions. Returns the new page.",
+    "Open a new page in this connection's own session (ensuring the session exists first) and return it. It always acts on the current session id — it cannot create or switch to a different one; use `session_attach` to switch to (or create) a session by id or title.",
   category: "session",
   inputSchema: z.object({
     url: z.string().url().optional(),

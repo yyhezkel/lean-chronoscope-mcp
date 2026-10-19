@@ -157,3 +157,22 @@ Summary: **6/6 PASS**
 - `docker stop` → "daemon stopped", exit 0 .......................... PASS
 
 Summary: **5/5 PASS** (shutdown-timeout SIGKILL path not exercised)
+
+---
+
+## 2026-10-19 — HTTP-bridge hardening + optional TLS (test container `lc-test-c`, :18803)
+
+Plain HTTP, `HTTP_RATE_PER_MIN=60` — `node scripts/smoke-test-http-bridge.mjs`:
+- /health 200 · bad token 401 · wrong-length token 401 · no auth 401 ........ PASS
+- initialize + tools/list (58 tools) ........................................ PASS
+- body 4195328B (Content-Length) → 413 · 4456448B (chunked) → 413 · session usable after ... PASS
+- burst of 70 bad-token requests → 20×429 (Retry-After 1), 50×401 · /health not limited ... PASS
+
+TLS (self-signed cert, `HTTP_TLS_CERT/KEY`, `HTTP_MAX_SESSIONS=2`), `LC_HTTP_URL=https://…`:
+- all checks above over HTTPS (rejectUnauthorized:false) ...................... PASS
+- 2/2 sessions open → next initialize 503; after DELETE → 200 ................. PASS
+- plain http:// on TLS port fails (ECONNRESET; curl exit 52) · curl -k /health 200 ... PASS
+
+Only `HTTP_TLS_CERT` set → "HTTP bridge NOT started" logged, port refuses (curl exit 56) ... PASS
+
+`LC_CONTAINER=lc-test-c node scripts/test-all-tools.mjs` (stdio) — Summary: **58/58 PASS**

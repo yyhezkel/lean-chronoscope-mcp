@@ -14,6 +14,7 @@ All tests are end-to-end against a running `browser-mcp` Docker container (real 
 | `scripts/smoke-test-m2-changes.mjs` | M2.5 | change-detect collapses identical sections to "(unchanged since rev N)"; migration 002 applied | stdio |
 | `scripts/smoke-test-m3.mjs` | M3 | cookies + localStorage + IndexedDB + interception (respond) + emulation (viewport/UA/network/geo) + redaction (Authorization stripped for external hosts) | stdio |
 | `scripts/smoke-test-m5m6.mjs` | M5/M6 | tool registry + snapshot_diff + performance_metrics + console/network FTS5 search + daemon_status + screenshot rescaling cap | stdio |
+| `scripts/smoke-test-http-bridge.mjs` | v1.7 | HTTP bridge over real HTTP(S): /health, bad/missing token 401, initialize + tools/list, body cap 413 (Content-Length + chunked), session cap 503 (`LC_MAX_SESSIONS`), rate-limit burst 429 + Retry-After, TLS mode (`https://` URL) + plain-http-on-TLS-port fails | HTTP (`LC_HTTP_URL`/`LC_HTTP_TOKEN`) |
 | `scripts/smoke-test-v11.mjs` | v1.1 | script_evaluate + page lifecycle + session lifecycle + wait_for + network_wait_for + upload_file registration | stdio |
 
 ## Run all
