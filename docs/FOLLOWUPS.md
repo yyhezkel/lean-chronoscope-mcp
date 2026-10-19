@@ -11,7 +11,7 @@ Known deferrals and rough edges, not blocking v1.4.0. Ordered roughly by value.
 
 ## Security / correctness
 
-- **`network_list` URL redaction.** Redaction runs in `network_get` (headers + bodies) but not on `network_list` summaries. A URL with inline credentials (`https://user:pass@host`) would appear unredacted in the list. See `docs/SECURITY.md` "Known limitations".
+- **Page-URL redaction.** Network/console tool output is now URL-redacted, but `page_list` / `page_navigate` / snapshot URLs are not (see `docs/SECURITY.md` "Known limitations").
 
 ## Robustness (found during live testing, 2026-05-28)
 

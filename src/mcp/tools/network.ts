@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { NetworkGetResult, NetworkListResult } from "@shared/protocol.js";
-import { loadRedactConfigFromEnv, redactBody, redactHeaders } from "@shared/redact.js";
+import { loadRedactConfigFromEnv, redactBody, redactHeaders, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
 import { formatNetworkSummary, formatNetworkDetail } from "../formatters/NetworkFormatter.js";
@@ -28,10 +28,11 @@ export const networkList = defineTool({
   category: "network",
   inputSchema: NetworkListInput,
   handler: async (input, ctx) => {
-    const result = await ctx.daemon.call<NetworkListResult>("network.list", {
+    const raw = await ctx.daemon.call<NetworkListResult>("network.list", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    const result = { ...raw, rows: raw.rows.map((r) => ({ ...r, url: redactUrl(r.url, REDACT_CFG) })) };
     const meta = paginationMeta(result.total, result.pageIdx, result.pageSize);
     const body =
       result.total === 0
@@ -66,6 +67,16 @@ export const networkGet = defineTool({
     const resHeadersRedacted = redactHeaders(detail.resHeaders, detail.url, REDACT_CFG);
     const reqBodyTextRedacted = redactBody(detail.reqBody.text, detail.url, REDACT_CFG) ?? null;
     const resBodyTextRedacted = redactBody(detail.resBody.text, detail.url, REDACT_CFG) ?? null;
+    const urlRedacted = redactUrl(detail.url, REDACT_CFG);
+    // Structured output gets the same redacted view as the text — never raw headers/bodies.
+    const structured: NetworkGetResult = {
+      ...detail,
+      url: urlRedacted,
+      reqHeaders: reqHeadersRedacted,
+      resHeaders: resHeadersRedacted,
+      reqBody: { ...detail.reqBody, text: reqBodyTextRedacted ?? undefined },
+      resBody: { ...detail.resBody, text: resBodyTextRedacted ?? undefined },
+    };
     // Map daemon shape back to formatter's expected shape (NetworkDetail).
     const formatted = formatNetworkDetail(
       {
@@ -77,7 +88,7 @@ export const networkGet = defineTool({
         tsResponse: detail.tsResponse,
         tsFinished: detail.tsFinished,
         method: detail.method,
-        url: detail.url,
+        url: urlRedacted,
         resourceType: null,
         status: detail.status,
         errorText: detail.errorText,
@@ -99,7 +110,7 @@ export const networkGet = defineTool({
     );
     return new McpResponse()
       .addSection("Request", formatted.text)
-      .setStructured(detail as unknown as Record<string, unknown>)
+      .setStructured(structured as unknown as Record<string, unknown>)
       .build();
   },
 });

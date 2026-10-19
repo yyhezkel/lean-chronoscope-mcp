@@ -42,18 +42,31 @@ const SECRET_HEADERS = new Set([
 ]);
 
 /**
+ * Header names whose value is a URL (or path) — kept, but run through URL
+ * redaction since they echo the request's query string.
+ */
+const URL_HEADERS = new Set(["referer", "location", "content-location", ":path"]);
+
+/**
+ * Key names whose values are treated as secrets — shared by the JSON and
+ * form-encoded body patterns and by the URL query-param redaction.
+ */
+const SECRET_KEY_SRC =
+  "access_?token|auth_?token|password|passwd|secret|api[_-]?key|client[_-]?secret|refresh[_-]?token|bearer";
+
+/**
  * Regexes that strip secret-shaped substrings inside bodies. Kept conservative
  * — false positives ("redacted normal text") are far worse than false negatives.
  */
 const BODY_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
   // JSON-style "token": "..." / "password": "..." / "api_key": "..."
   {
-    re: /("(?:access_?token|auth_?token|password|passwd|secret|api[_-]?key|client[_-]?secret|refresh[_-]?token|bearer)"\s*:\s*")[^"]*(")/gi,
+    re: new RegExp(`("(?:${SECRET_KEY_SRC})"\\s*:\\s*")[^"]*(")`, "gi"),
     replacement: "$1[REDACTED]$2",
   },
   // Form-encoded password=... / api_key=...
   {
-    re: /\b(access_?token|auth_?token|password|passwd|secret|api[_-]?key|client[_-]?secret|refresh[_-]?token|bearer)=([^&\s"]+)/gi,
+    re: new RegExp(`\\b(${SECRET_KEY_SRC})=([^&\\s"]+)`, "gi"),
     replacement: "$1=[REDACTED]",
   },
   // Authorization: Bearer ... or basic ... inside text
@@ -61,7 +74,17 @@ const BODY_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
     re: /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g,
     replacement: "$1 [REDACTED]",
   },
+  // Inline URL credentials inside text (stack traces, error messages, bodies)
+  {
+    re: /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@"'<>]+@/gi,
+    replacement: "$1[REDACTED]@",
+  },
 ];
+
+/** Userinfo of a whole URL string: everything between `scheme://` and the last `@` of the authority. */
+const URL_USERINFO_RE = /^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i;
+/** Secret query/fragment params; value stops at `&` or `#` so the rest of the URL survives. */
+const URL_PARAM_RE = new RegExp(`([?&#;](?:${SECRET_KEY_SRC})=)[^&#\\s]*`, "gi");
 
 export function loadRedactConfigFromEnv(): RedactConfig {
   const rawMode = (env("REDACT_MODE") ?? "external").toLowerCase();
@@ -121,8 +144,11 @@ export function redactHeaders(
   if (!shouldRedact(url, cfg)) return headers;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
-    if (SECRET_HEADERS.has(k.toLowerCase())) {
+    const lk = k.toLowerCase();
+    if (SECRET_HEADERS.has(lk)) {
       out[k] = "[REDACTED]";
+    } else if (URL_HEADERS.has(lk)) {
+      out[k] = redactUrlString(v);
     } else {
       out[k] = v;
     }
@@ -143,4 +169,20 @@ export function redactBody(
     out = out.replace(re, replacement);
   }
   return out;
+}
+
+/**
+ * Redact credentials inside a URL: userinfo (`https://user:pass@h` and
+ * `https://user@h` → `https://[REDACTED]@h`) and the values of secret-named
+ * query/fragment params. Purely string-based, so unparseable URLs are still
+ * redacted and never throw; everything else in the URL is left byte-identical.
+ */
+export function redactUrl<T extends string | null | undefined>(url: T, cfg: RedactConfig): T {
+  if (url == null) return url;
+  if (!shouldRedact(url, cfg)) return url;
+  return redactUrlString(url) as T;
+}
+
+function redactUrlString(url: string): string {
+  return url.replace(URL_USERINFO_RE, "$1[REDACTED]@").replace(URL_PARAM_RE, "$1[REDACTED]");
 }

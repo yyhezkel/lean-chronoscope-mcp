@@ -11,6 +11,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export const SEED_URL = "https://tool-smoke.test/";
 export const API_URL = "https://tool-smoke.test/api/data";
+/** Secret carried in a query param by the seed page's second fetch; must never surface in tool output. */
+export const URL_SECRET = "SECRET123";
 export const SEED_HTML = readFileSync(join(here, "../fixtures/tool-smoke.html"), "utf8");
 
 export async function installSeed({ callTool, sc }) {

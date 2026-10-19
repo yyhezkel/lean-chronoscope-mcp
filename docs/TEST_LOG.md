@@ -157,3 +157,15 @@ Summary: **6/6 PASS**
 - `docker stop` → "daemon stopped", exit 0 .......................... PASS
 
 Summary: **5/5 PASS** (shutdown-timeout SIGKILL path not exercised)
+
+---
+
+## 2026-10-19 — redaction gaps (URL redaction across network/console tools)
+
+- `pnpm test` (vitest, `src/shared/redact.test.ts`) ................. 15/15 PASS
+- `scripts/test-all-tools.mjs` on test container `lc-test-a` ........ 58/58 PASS
+  - new: seed fetches `/api/data?access_token=SECRET123`; `SECRET123` absent from
+    text + structuredContent of network_wait_for / network_list / network_get /
+    network_search (search still matches it via FTS) ................ PASS
+
+Summary: **58/58 PASS** + 15/15 unit

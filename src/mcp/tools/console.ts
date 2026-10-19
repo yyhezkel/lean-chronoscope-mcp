@@ -1,9 +1,12 @@
 import { z } from "zod";
 import type { ConsoleGetResult, ConsoleListResult } from "@shared/protocol.js";
+import { loadRedactConfigFromEnv, redactBody, redactUrl } from "@shared/redact.js";
 import { McpResponse } from "../response/McpResponse.js";
 import { defineTool } from "./ToolDefinition.js";
 import { groupConsecutive } from "../formatters/ConsoleFormatter.js";
 import { paginationMeta } from "../pagination.js";
+
+const REDACT_CFG = loadRedactConfigFromEnv();
 
 const ConsoleListInput = z.object({
   pageId: z.string().optional(),
@@ -23,10 +26,19 @@ export const consoleList = defineTool({
   category: "console",
   inputSchema: ConsoleListInput,
   handler: async (input, ctx) => {
-    const result = await ctx.daemon.call<ConsoleListResult>("console.list", {
+    const raw = await ctx.daemon.call<ConsoleListResult>("console.list", {
       sessionId: ctx.sessionId,
       ...input,
     });
+    // Gate on the message's source url; a null url is treated as external.
+    const result: ConsoleListResult = {
+      ...raw,
+      rows: raw.rows.map((r) => ({
+        ...r,
+        text: redactBody(r.text, r.url, REDACT_CFG)!,
+        url: redactUrl(r.url, REDACT_CFG),
+      })),
+    };
     const meta = paginationMeta(result.total, result.pageIdx, result.pageSize);
     const lines = (input.group !== false ? groupConsecutive(result.rows) : result.rows.map((r) => ({ msgid: r.id, text: formatRow(r) })))
       .map((l) => l.text)
@@ -50,10 +62,17 @@ export const consoleGet = defineTool({
   category: "console",
   inputSchema: ConsoleGetInput,
   handler: async (input, ctx) => {
-    const r = await ctx.daemon.call<ConsoleGetResult>("console.get", {
+    const raw = await ctx.daemon.call<ConsoleGetResult>("console.get", {
       sessionId: ctx.sessionId,
       id: input.msgid,
     });
+    const r: ConsoleGetResult = {
+      ...raw,
+      text: redactBody(raw.text, raw.url, REDACT_CFG)!,
+      url: redactUrl(raw.url, REDACT_CFG),
+      stack: redactBody(raw.stack, raw.url, REDACT_CFG) ?? null,
+      args: redactBody(raw.args, raw.url, REDACT_CFG) ?? null,
+    };
     const lines: string[] = [];
     lines.push(`#${r.id} [${r.level}] ${new Date(r.ts).toISOString()}`);
     lines.push(r.text);

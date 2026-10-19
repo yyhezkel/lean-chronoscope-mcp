@@ -24,16 +24,20 @@ for v1.0.
 | HTTP+SSE bridge (opt-in) | Disabled unless `LEAN_CHRONOSCOPE_HTTP_TOKEN` set. Requires `Authorization: Bearer <token>`. Binds `127.0.0.1` by default — **never** `0.0.0.0` without a TLS-terminating proxy. No built-in TLS. |
 | Process user | Container runs as non-root `mcp:1500`. |
 | Chrome flags | `--no-sandbox` (required in container) + `--disable-dev-shm-usage`; `shm_size: 2g`. |
-| Secret leakage in captures | 3-mode redaction (`src/shared/redact.ts`), default `external`: redacts Authorization/Cookie/API-key headers + token-shaped body values for non-trusted hosts. Applied in `network_get`. |
+| Secret leakage in captures | 3-mode redaction (`src/shared/redact.ts`), default `external`: redacts Authorization/Cookie/API-key headers, token-shaped body values, and URL credentials (userinfo + secret-named query/fragment params, also inside `Referer`/`Location`) for non-trusted hosts. Applied in the MCP tool layer to text **and** `structuredContent` of `network_list`/`network_get`/`network_search`/`network_wait_for` and `console_list`/`console_get`/`console_search` (console rows gate on their source url; rows without one are treated as external). |
 | Blob paths | Blobs stored under `/var/lib/lean-chronoscope/sessions/<id>/blobs`; only sha referenced in tool output, not host paths. |
 | Logs | pino → file only, never stdout (stdout is MCP framing). Rotated at 10MB, 5 archives. |
 | Retention | Session dirs older than `LEAN_CHRONOSCOPE_RETENTION_DAYS` (default 7) swept on daemon start. |
 
 ## Known limitations (acceptable for v1.0)
 
-- **`network_list` summaries are not redacted** — only `network_get` is. URLs with
-  inline credentials (`https://user:pass@host`) would appear in the list. Mitigation:
-  redaction of list URLs is a follow-up; avoid credential-in-URL flows.
+- **Redaction is output-side only.** The SQLite capture (and FTS index) stores raw
+  URLs/headers/bodies; tools redact what they return. So FTS still *matches* on a
+  secret value (e.g. `network_search` for a token finds the request), it just
+  never echoes it. Anyone with direct access to the session DB sees raw data.
+- **Other tools still show raw URLs.** Page URLs in `page_list` / `page_navigate`
+  / snapshots and values read back by storage/cookie/`script_evaluate` tools are
+  not redacted — they reflect live page state the caller can already read.
 - **HTTP bridge has no TLS and no rate limiting.** Intended for loopback or behind
   a reverse proxy / SSH tunnel only.
 - **No per-tool authorization.** A connected client can run every tool, including
