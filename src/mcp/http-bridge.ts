@@ -42,6 +42,9 @@ export interface HttpBridgeOptions {
  */
 export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Server> {
   const sessionTransports = new Map<string, StreamableHTTPServerTransport>();
+  // Live transports per daemon session. Several clients can pin the same
+  // `x-lc-session`; the daemon session is closed only when the last one leaves.
+  const sessionRefs = new Map<string, number>();
 
   const httpServer = http.createServer(async (req, res) => {
     // Health probe — never requires auth.
@@ -76,6 +79,7 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSid) => {
           sessionTransports.set(newSid, transport!);
+          sessionRefs.set(browserMcpSession, (sessionRefs.get(browserMcpSession) ?? 0) + 1);
           log.info({ sid: newSid, browserMcpSession }, "HTTP MCP session initialized");
         },
       });
@@ -83,7 +87,14 @@ export async function startHttpBridge(opts: HttpBridgeOptions): Promise<http.Ser
       await server.connect(transport);
       transport.onclose = () => {
         const closeSid = transport!.sessionId;
-        if (closeSid) sessionTransports.delete(closeSid);
+        if (!closeSid || !sessionTransports.delete(closeSid)) return; // never initialized / already closed
+        const refs = (sessionRefs.get(browserMcpSession) ?? 1) - 1;
+        if (refs > 0) {
+          sessionRefs.set(browserMcpSession, refs);
+          log.info({ sid: closeSid, browserMcpSession, refs }, "HTTP MCP session closed (daemon session still shared)");
+          return;
+        }
+        sessionRefs.delete(browserMcpSession);
         // Close the daemon-side browser session too, otherwise the BrowserContext
         // + SQLite + on-disk dir leak until daemon restart or the age sweep.
         // closeSession is idempotent, so racing the reaper is harmless.

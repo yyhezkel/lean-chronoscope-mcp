@@ -140,6 +140,21 @@ const execFileAsync = promisify(execFile);
 
 const log = getLogger("daemon/rpc");
 
+/** RPCs that don't refresh a session's idle timer (see dispatch()). */
+const PASSIVE_METHODS: ReadonlySet<string> = new Set([
+  "status",
+  "session.ensure",
+  "session.list",
+  "session.close",
+  "session.resolve",
+  "daemon.status",
+  "fonts.list",
+  "resources.list",
+  "resources.read",
+  "resources.subscribe",
+  "resources.unsubscribe",
+]);
+
 function sizeOfFile(p: string): number {
   try {
     return fs.statSync(p).size;
@@ -185,7 +200,10 @@ export class RpcDispatcher {
     const sid = (params as { sessionId?: string } | undefined)?.sessionId;
     const sess = sid ? this.sessions.sessions.get(sid) : undefined;
     if (sess) {
-      sess.lastActivity = Date.now();
+      // Lifecycle/meta RPCs are not browser activity: a client that merely
+      // connects (session.ensure) or polls status must not keep an otherwise
+      // idle shared session alive forever.
+      if (!PASSIVE_METHODS.has(method)) sess.lastActivity = Date.now();
       sess.inFlight++;
     }
     try {

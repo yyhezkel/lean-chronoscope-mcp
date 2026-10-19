@@ -118,11 +118,22 @@ export async function runDaemon(config: DaemonConfig): Promise<void> {
     log.info({ signal }, "shutdown initiated");
     if (reaper) clearInterval(reaper);
     server.close();
-    try {
+    // Bounded cleanup: a Chrome with many renderers can take longer than
+    // docker's stop_grace_period (30s) to close, ending in a SIGKILL mid-WAL.
+    const cleanup = (async () => {
       await dispatcher.closeAll(); // checkpoints each session's WAL on close
       await browser.close();
-    } catch (err) {
-      log.error({ err }, "error during shutdown");
+    })().catch((err) => log.error({ err }, "error during shutdown"));
+    const deadlineMs = 20_000;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      cleanup.then(() => false),
+      new Promise<boolean>((r) => (timer = setTimeout(() => r(true), deadlineMs))),
+    ]);
+    clearTimeout(timer);
+    if (timedOut) {
+      log.warn({ deadlineMs }, "shutdown cleanup timed out — killing Chrome");
+      browser.process()?.kill("SIGKILL");
     }
     registry.close();
     broadcaster.dispose();

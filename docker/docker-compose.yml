@@ -12,6 +12,8 @@ services:
     mem_limit: 4g
     memswap_limit: 4g
     pids_limit: 2048
+    # No CPU cap let a runaway session hit 240% CPU on a 4-core shared host.
+    cpus: "2"
     # HTTP+SSE bridge published to host loopback only. The agent runtime loads
     # HTTP MCP servers (not stdio), so this is how Claude attaches.
     ports:

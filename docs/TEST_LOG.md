@@ -145,3 +145,15 @@ Summary: **7/7 PASS** (M4 rescaling/slim/retention/HTTP-bridge, M5 snapshot_diff
 - m3            ........ PASS
 
 Summary: **6/6 PASS**
+
+---
+
+## 2026-10-19 — reaper/shared-session fix (e2e, test container, IDLE_MS=8s, reaper 2s)
+
+- pinned session evicted despite connect-only churn every 3s ........ PASS
+- shared session stays open when 1 of 2 clients disconnects ......... PASS
+- shared session closes when the last client disconnects ............ PASS
+- session with real activity (navigate every 3s) not evicted ........ PASS
+- `docker stop` → "daemon stopped", exit 0 .......................... PASS
+
+Summary: **5/5 PASS** (shutdown-timeout SIGKILL path not exercised)
