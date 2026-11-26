@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project guide for Claude Code when working in `/home/runner/browser-mcp/`.
+Project guide for Claude Code when working in this repository.
 
 ## Overview
 
@@ -8,7 +8,7 @@ Token-efficient browser MCP server: a long-running headless Chrome in Docker, sh
 
 Architecture: split between a **daemon** (owns Chrome + SQLite) and a per-Claude-session **mcp-server** (stdio), talking over a Unix socket with NDJSON JSON-RPC. Capture-everything firehose into per-session SQLite at `/var/lib/lean-chronoscope/sessions/<id>/db.sqlite`; tools are queries on top.
 
-Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current state: **v1.7.0 — M0–M6 + full tool surface + session lifecycle/retention + session reuse + multi-script fonts + font-watch auto-reload + output redaction everywhere + per-session lock & page reaper + in-process Chrome relaunch + screencast resource + hardened HTTP bridge (TLS/rate-limit/body cap)**, 58 tools (session/page lifecycle incl. `session_attach`, input incl. upload_file, snapshot+diff, screenshot, console+search, network+search+wait, intercept, storage, script_evaluate, emulation, waits, daemon_status, fonts_list). Session management: a persistent cross-session `registry.sqlite` (survives daemon restarts, reconciled at boot; sessions can carry an optional `title`), correct size accounting on `session_list`/`daemon_status` (db+wal+shm+blobs, with `dbBytes`/`blobBytes` breakdown; `session_list` takes `includeClosed` and returns `title`), and a background **reaper** that evicts idle/oversized sessions, prunes console/network/snapshot rows (now also GC-ing orphaned blob files), and runs the age-retention sweep hourly. Sessions can be re-attached across connections by id or title (`session_attach`), rehydrating a closed session's captured history from disk. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
+Full implementation plan: [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md). Current version and release log: `CHANGELOG.md`, `PROGRESS.md`. Security/trust model: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ## Run / dev
 
@@ -41,194 +41,28 @@ claude mcp list      # lean-chronoscope: http://127.0.0.1:8780/mcp (HTTP) - ✓ 
 curl -s http://127.0.0.1:8780/health   # {"ok":true,...} (no auth)
 ```
 
-Tools surface as `mcp__lean-chronoscope__*` after a session restart. The bridge mints
-a fresh browser session per HTTP MCP session (recorded with `source='http'`), and
-its `transport.onclose` now closes that daemon session so BrowserContexts/SQLite
-don't leak on client disconnect. Each HTTP MCP session also gets its **own daemon
-socket connection** (opened at initialize, closed with the transport — or right
-away if the first request never initializes): daemon-side resource subscriptions
-are keyed per connection, so one client's unsubscribe can't end another's stream,
-and a disconnect releases its subscriptions (stopping a CDP screencast nobody else
-watches). A client that dies without DELETE never fires `onclose` (the SDK has no
-idle timeout, and a watched page is exempt from the daemon's idle eviction), so an
-**idle sweep** closes transports with no request open (an open GET SSE stream
-counts as alive; TCP keepalive detects half-open SSE sockets) and none started for
-`HTTP_IDLE_MS` (default 30 min) via the same `onclose` path. A stale/unknown
-`mcp-session-id` gets the spec'd **404** (`-32001 Session not found`) so the client
-re-initializes; an `initialize` carrying a stale header is still accepted.
+Bridge internals (per-connection daemon sockets, idle sweep, 404 on stale session, `x-lc-session` reconnect, hardening/rate limits): [`docs/HTTP_BRIDGE.md`](docs/HTTP_BRIDGE.md).
 
-**Session persistence on reconnect:** the bridge honors a client-supplied
-`x-lc-session: <id>` request header — reconnecting with the same header returns
-to the same daemon session (rehydrated from disk if the earlier disconnect closed
-it) instead of getting a fresh random `http-<rand>` id. No header → random id as
-before. Session ids from untrusted callers (this header, and `session_attach`'s
+Session ids from untrusted callers (this header, and `session_attach`'s
 `sessionId`) are validated by `assertSafeSessionId()` in the daemon's `ensure`,
 which rejects ids containing `/`, `\`, `..`, NUL, or that are empty / >200 chars —
 an id becomes a filesystem path, so this prevents traversal out of the sessions dir.
 
-Bridge hardening: constant-time bearer compare, 4 MiB body cap (413), rate limits
-in separate token buckets (429) — failed auth per client IP, authenticated requests
-per MCP session, session-less (initialize) requests per IP — so parallel agents
-behind docker-proxy's shared gateway IP don't starve each other and a bad-token
-flood can't lock out live sessions; concurrent-session cap (503), and optional
-built-in TLS — see the tunables table below. Invalid numeric limits (typos, NaN,
-negative) log an error and fall back to the default (fail closed). Smoke: `scripts/smoke-test-http-bridge.mjs`.
-
-The bearer token lives in
-`docker/docker-compose.yml` (`LEAN_CHRONOSCOPE_HTTP_TOKEN`, legacy
-`BROWSER_MCP_HTTP_TOKEN` still honored); rotate it there + in the
+The bearer token lives in `docker/.env` (`LEAN_CHRONOSCOPE_HTTP_TOKEN`, read by
+`docker/docker-compose.yml`; legacy `BROWSER_MCP_HTTP_TOKEN` still honored); rotate it there + in the
 `claude mcp add` header if needed.
 
-## Screencast resource
+## Reference (lazy — read when touching the area)
 
-Each page lists `browser://session/{sid}/page/{pid}/screencast` (`image/jpeg`).
-Subscribing starts a CDP `Page.startScreencast` (JPEG q60, ≤1280px) for that page;
-frames are throttled to ~2fps by delaying the frame ack, only the **latest** frame
-is held (in memory — not BlobStore), and each one fires `resources/updated`. The
-screencast stops when the URI's last subscriber leaves (unsubscribe or connection
-drop — per-URI refcount via `SubscriptionRegistry.setUriHooks`) or the page closes
-(daemon logs `screencast started` / `screencast stopped`). `resources/read` returns
-an MCP `blob` content (base64 JPEG); without a live frame it captures one on demand.
-Code: `src/daemon/screencast.ts`. Smoke: `scripts/smoke-test-v17-screencast.mjs`.
+| Area | Doc |
+|---|---|
+| Screencast resource, registry/reaper/blob-GC, Chrome in-process relaunch, session reuse, page reaper, per-session lock, SQLite pragmas | [`docs/DAEMON.md`](docs/DAEMON.md) |
+| Tool-surface modes (full/slim/gateway) + all `LEAN_CHRONOSCOPE_*` env tunables | [`docs/CONFIG.md`](docs/CONFIG.md) |
+| Fonts / custom-font drop-in / `fonts_list` | [`docs/FONTS.md`](docs/FONTS.md) |
 
-## Tool-surface modes (mount-token cost)
-
-| Mode | flag / env | tools advertised | `tools/list` payload |
-|---|---|---|---|
-| full (default) | — | 57 | ~5,350 tok |
-| slim | `--slim` / `LEAN_CHRONOSCOPE_SLIM=1` | 5 core | ~547 tok |
-| gateway | `--gateway` / `LEAN_CHRONOSCOPE_GATEWAY=1` | 3 meta (`tools_catalog`, `tool_schema`, `tools_invoke`); the 58 stay callable by name | ~321 tok |
-
-Gateway mode advertises a 3-tool index — the model reads `tools_catalog`, fetches
-`tool_schema` only for tools it needs, then dispatches via `tools_invoke`. Reproduces
-client-side schema deferral for clients that don't have it. **Note:** Claude Code
-already defers MCP tool schemas natively (only tool *names* enter context at mount;
-full schemas load on demand via `ToolSearch`), so gateway is redundant there and
-slightly worse (loses native function-calling + arg validation). Use it for
-non-deferring clients or extreme token budgets. See [`docs/COMPARISON.md`](docs/COMPARISON.md).
-
-## Fonts (multi-script rendering)
-
-Headless Chrome renders with the **container's** fonts — the host OS/locale is
-irrelevant. The image bakes in `fonts-noto-core` (Hebrew, Arabic, Cyrillic, …),
-`fonts-noto-cjk` (Chinese/Japanese/Korean), `fonts-noto-color-emoji`, and
-`fontconfig`, so non-Latin text renders out of the box instead of tofu (□□□).
-
-- **Custom fonts without rebuilding:** mount `.ttf`/`.otf`/`.woff2` files into
-  `/home/mcp/.fonts` (commented example in `docker-compose.yml`). The daemon
-  **font-watch** (piggybacked on the reaper) detects changes in that dir and
-  auto-restarts itself once the dir is stable across two ticks (~2 min worst
-  case) — Docker's `restart: unless-stopped` revives the container and the
-  entrypoint's `fc-cache -f` loads the fonts before Chrome launches. Note: the
-  auto-restart kills active sessions' browser state (captured history survives
-  in SQLite). `docker restart` forces it immediately;
-  `LEAN_CHRONOSCOPE_FONT_WATCH=0` (or a disabled reaper) turns font-watch off.
-  Chrome builds its font list at startup; fonts added while it's running are
-  never picked up without that relaunch.
-- **`fonts_list` tool** (read-only, wraps `fc-list`): lists installed families;
-  `{lang: "he"}` filters to families covering a language — an empty result means
-  that script will render as tofu. Lets the model check coverage before
-  screenshotting and tell the operator what to mount.
-- Web fonts (`@font-face`) served by a site render regardless of container
-  fonts, but only cover what the site ships — they're not a substitute.
-
-## Session lifecycle & retention
-
-The daemon keeps a persistent `registry.sqlite` at `<dataDir>/registry.sqlite`
-(a `sessions` table indexing every session across daemon restarts) and runs a
-background **reaper** (`setInterval`) that flushes size stats to the registry,
-evicts idle/oversized sessions (frees the BrowserContext + memory, leaves the
-on-disk dir for the age sweep), prunes over-long console/network/snapshot tables,
-and runs the age-retention sweep ~hourly. **Blob-GC (dedup-safe):**
-`SessionWriter.prune()` now, right after deleting old console/network rows, sweeps
-orphaned blob files — it deletes only `sessions/<id>/blobs/<sha>.bin` whose sha is
-no longer referenced by ANY surviving row (content-addressed dedup is respected: a
-shared blob stays while any row points to it), instead of leaving orphaned blobs
-until the 7-day age sweep (`BlobStore.sweepUnreferenced(keep)` + `BlobStore.remove(sha)`).
-
-**Chrome crash recovery (in-process relaunch):** if Chrome disconnects
-unexpectedly, the daemon does NOT exit — `index.ts` relaunches Chrome in-process
-with backoff (3 attempts at ~1s/3s/9s) and `RpcDispatcher.replaceBrowser()` →
-`SessionRegistry.rebind()` re-points every live session at the new browser: a
-fresh `BrowserContext`, old pages dropped (rows marked closed), intercept rules
-kept (`InterceptionEngine.resetPages()`), per-page emulation lost; all captured
-history on disk stays readable. The same MCP connection keeps working
-(`page_navigate` opens a new page). While relaunching, `dispatch()` gates
-browser-touching RPCs (bounded 30s wait, then a `BROWSER_DISCONNECTED` error);
-passive reads/status stay answerable. `daemon_status` reports `chromeRelaunches`
-+ `lastChromeRelaunchAt`. Only if all attempts fail does it fall back to exiting
-for Docker to restart it. Smoke: `scripts/smoke-test-v17-relaunch.mjs`.
-
-**Session reuse:** sessions can carry an optional `title` (a new column in
-`registry.sqlite`, added via idempotent `ALTER TABLE`); the RPC
-`session.resolve({title})` returns the newest active session id with that title.
-The `session_attach` tool points a connection at an existing session by id or
-title and rehydrates a closed session's captured history from disk (the
-BrowserContext starts fresh — browser state isn't persisted — but all captured
-console/network/snapshot history is readable); a title matching nothing starts a
-new session carrying that title (attach-or-create). See "MCP client integration"
-for the `x-lc-session` reconnect header and the `assertSafeSessionId` traversal guard.
-
-**Page-level reaper:** each tick, in every surviving session, the reaper also
-closes pages idle past `PAGE_IDLE_MS` and, beyond that, the oldest-idle pages
-over `MAX_PAGES_PER_SESSION`. It never closes the selected page or a page with an
-RPC in flight, skips a session whose lock is held, and closes under that lock.
-Each page tracks `lastActivity`/`inFlight` (target = `pageId ?? selectedPageId`).
-
-**Per-session serialization:** RPCs that mutate browser/page state (`page.*`
-incl. evaluate, `input.*`, `emulate.*`, `intercept.add/remove`, `cookies.set/clear`,
-`storage.set/remove/clear`, `indexeddb.clear`, `screenshot.take`, `snapshot.take`)
-run under a per-session FIFO mutex (`Session.lock`, `src/shared/mutex.ts`;
-allowlist `LOCKED_METHODS` in `rpc-handlers.ts`), so un-awaited calls (navigate →
-snapshot) keep their order. `wait.for` / `network.wait_for`, read-only queries,
-`session.close` and `page.close` deliberately bypass it (so a stuck page can
-always be closed). Each locked op is bounded by `LOCKED_OP_TIMEOUT_MS` (60s;
-navigate gets its own `timeoutMs`+5s if longer): on expiry the lock is released
-and the RPC fails with TIMEOUT (-32005), but the puppeteer call may keep running
-until it settles, the page navigates, or `page_close` kills it — e.g. an
-`awaitPromise` evaluate that never settles, or a JS `alert`/`confirm` opened by a
-click (dialogs are not auto-dismissed). The abandoned op keeps its session/page
-`inFlight` guards until it actually settles (so the reaper can't close a page it
-still drives; the settle is logged as `abandoned op settled`, with `ms`), and a
-late-finishing `page.new` only takes the selection if nothing was `page_select`-ed
-meanwhile. Because the op timeout is the hard cap, `page_navigate` with
-`timeoutMs: 0` ("no navigation timeout") is still bounded by
-`LOCKED_OP_TIMEOUT_MS`. An invalid value (e.g. `6O0`) logs an error once and
-falls back to 60000. Queued locked RPCs re-check the Chrome
-relaunch gate once they acquire the lock. `SessionRegistry.ensure` dedupes
-concurrent creations of one id (in-flight promise map), so racing navigates /
-HTTP initializes on a brand-new id share one Session.
-
-Session DBs open with
-`auto_vacuum=INCREMENTAL` + `wal_autocheckpoint=1000` + `journal_size_limit=64MB`,
-and `wal_checkpoint(TRUNCATE)` runs on clean close so the persisted `db.sqlite`
-is complete/compact (docker-compose sets `stop_grace_period: 30s` to allow it).
-
-Env tunables (all `LEAN_CHRONOSCOPE_*`; legacy `BROWSER_MCP_*` names still honored):
-
-| Var | Default | Purpose |
-|---|---|---|
-| `LEAN_CHRONOSCOPE_REAPER_INTERVAL_MS` | `60000` | reaper tick cadence; `0` disables the reaper |
-| `LEAN_CHRONOSCOPE_IDLE_MS` | `1800000` (30min) | evict sessions idle longer than this |
-| `LEAN_CHRONOSCOPE_SIZE_CAP_BYTES` | `524288000` (500MB) | evict sessions over this size; `0` disables |
-| `LEAN_CHRONOSCOPE_RETENTION_DAYS` | `7` | age-retention sweep for on-disk session dirs |
-| `LEAN_CHRONOSCOPE_MAX_CONSOLE` | `50000` | keep newest N console rows per session |
-| `LEAN_CHRONOSCOPE_MAX_NETWORK` | `50000` | keep newest N network rows per session |
-| `LEAN_CHRONOSCOPE_MAX_SNAPSHOTS_PER_PAGE` | `10` | keep newest N snapshots per page |
-| `LEAN_CHRONOSCOPE_PAGE_IDLE_MS` | `900000` (15min) | reaper closes non-selected pages idle longer than this; `0` disables |
-| `LEAN_CHRONOSCOPE_MAX_PAGES_PER_SESSION` | `20` | reaper closes oldest-idle non-selected pages beyond this cap; `0` disables |
-| `LEAN_CHRONOSCOPE_LOCKED_OP_TIMEOUT_MS` | `60000` | max time a locked RPC may hold the session lock before failing with TIMEOUT; `0` disables; invalid → logged + default |
-| `LEAN_CHRONOSCOPE_FONT_WATCH` | `1` | auto-restart daemon when fonts change in `FONTS_DIR`; `0` disables |
-| `LEAN_CHRONOSCOPE_FONTS_DIR` | `/home/mcp/.fonts` | custom-font drop-in dir watched by font-watch |
-| `LEAN_CHRONOSCOPE_HTTP_TOKEN` | (unset) | HTTP bridge bearer token |
-| `LEAN_CHRONOSCOPE_HTTP_MAX_BODY_BYTES` | `4194304` (4 MiB) | HTTP bridge POST body cap; larger → 413 |
-| `LEAN_CHRONOSCOPE_HTTP_RATE_PER_MIN` | `60` | failed-auth attempts per client IP (token bucket, burst = rate) → 429 + `Retry-After`; once exhausted, requests without a live `mcp-session-id` are refused before the token compare, and a bad token on a live sid gets 429 instead of 401; `0` disables |
-| `LEAN_CHRONOSCOPE_HTTP_SESSION_RATE_PER_MIN` | `600` | authenticated requests per MCP session (`mcp-session-id`) → 429; DELETE exempt; `0` disables |
-| `LEAN_CHRONOSCOPE_HTTP_INIT_RATE_PER_MIN` | `120` | authenticated requests with no live session (initialize) per client IP → 429; `0` disables |
-| `LEAN_CHRONOSCOPE_HTTP_MAX_SESSIONS` | `64` | max concurrent HTTP MCP transports; new sessions beyond → 503; `0` = unlimited |
-| `LEAN_CHRONOSCOPE_HTTP_IDLE_MS` | `1800000` (30min) | close HTTP MCP sessions with no open request (incl. SSE stream) for this long — releases daemon connection/subscriptions/screencast; client gets 404 and re-inits; `0` disables |
-| `LEAN_CHRONOSCOPE_HTTP_TLS_CERT` / `_TLS_KEY` | (unset) | PEM file paths; both set → bridge serves HTTPS; only one set → bridge refuses to start (fail closed) |
-| `LEAN_CHRONOSCOPE_DATA_DIR` | `/var/lib/lean-chronoscope` | data root (sessions + `registry.sqlite`) |
+- Claude Code already defers MCP tool schemas natively, so gateway mode is redundant there (see `docs/CONFIG.md`).
+- Headless Chrome renders with the **container's** fonts. Dropping fonts into `/home/mcp/.fonts` auto-restarts the daemon, which kills active sessions' browser state (captured history survives in SQLite).
+- A new RPC that mutates browser/page state must be added to `LOCKED_METHODS` in `src/daemon/rpc-handlers.ts` (per-session FIFO lock — see `docs/DAEMON.md`).
 
 ## Tests
 
@@ -245,7 +79,7 @@ After each test run, append a timestamped entry to `docs/TEST_LOG.md`.
 
 ## Follow-ups
 
-Known deferrals and rough edges (screencast, HTTP TLS, in-place Chrome relaunch, network_list redaction, etc.): [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md).
+Known deferrals and rough edges: [`docs/FOLLOWUPS.md`](docs/FOLLOWUPS.md).
 
 ## Gotchas
 
@@ -253,4 +87,3 @@ Known deferrals and rough edges (screencast, HTTP TLS, in-place Chrome relaunch,
 - Chromium denies IndexedDB on `data:` URLs (opaque origin). For IDB tests, serve seed HTML from a fake HTTPS host via `intercept_add` with a `respond` action.
 - `page.setUserAgent(ua, metadata)` rejects when `metadata` isn't the full `Emulation.UserAgentMetadata` shape. Use the plain-string overload; pass `platform` via the options overload; push `Accept-Language` via `Network.setExtraHTTPHeaders`.
 - FTS5: only one `snippet()`/`highlight()` per SELECT, and aux functions (`snippet`/`bm25`) don't combine with a JOIN on a multi-column external-content table (raises "SQL logic error") — rank in a subquery over the FTS table alone, then join. Bare queries with `.`/`:`/`-` (e.g. `example.com`) are FTS syntax errors; `normalizeFtsQuery` in `reader.ts` quotes them.
-- IndexedDB is blocked on `data:` URLs (opaque origin).
